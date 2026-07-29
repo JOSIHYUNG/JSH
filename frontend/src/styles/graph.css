@@ -1,0 +1,3 @@
+.graph-canvas > div { border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+.graph-canvas canvas { cursor: grab; }
+.graph-canvas canvas:active { cursor: grabbing; }
