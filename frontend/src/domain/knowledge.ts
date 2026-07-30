@@ -20,7 +20,7 @@ export type DocumentSummary = {
   id: number
   title: string
   filename: string | null
-  source_type: 'paste' | 'upload'
+  source_type: 'paste' | 'upload' | 'ai_generated'
   media_type: string
   summary: string
   keywords: string[]
@@ -80,6 +80,7 @@ export type DocumentDetail = DocumentSummary & {
   chunks: DocumentChunk[]
   concepts: ConceptSummary[]
   original_content: string
+  original_range?: { start_char: number; end_char: number; highlight_start_char: number | null; highlight_end_char: number | null }
   latest_job: AnalysisJob | null
 }
 
@@ -96,6 +97,9 @@ export type GraphNode = {
     summary?: string
     connection_count?: number
     status?: DocumentStatus
+    document_id?: number
+    start_char?: number
+    end_char?: number
   }
 }
 
@@ -132,7 +136,7 @@ export type QuestionSource = {
   document_id: number | null
   chunk_id: number | null
   document_title: string
-  document_status: 'ready' | 'deleted' | 'reanalyzed'
+  document_status: 'ready' | 'document_deleted' | 'document_reanalyzed' | 'mapping_unavailable'
   chunk_preview: string
   start_char: number | null
   end_char: number | null
@@ -145,9 +149,12 @@ export type QuestionStatus = 'queued' | 'retrieving' | 'generating' | 'completed
 
 export type QuestionResult = {
   id: number
+  conversation_id: number | null
+  turn_index: number | null
   question: string
   status: QuestionStatus
   answer_markdown: string | null
+  answer_mode: 'grounded' | 'general'
   answer_language: string | null
   sources: QuestionSource[]
   related_concepts: ConceptSummary[]
@@ -159,18 +166,41 @@ export type QuestionResult = {
     top_score: number | null
     used_chunk_ids: number[]
   }
+  error: { code: string; message: string; retryable: boolean } | null
+  context: { turn_count: number; truncated: boolean; retrieval_query: string | null } | null
+  generated_document: DocumentSummary | null
   created_at: string
   completed_at: string | null
 }
 
 export type QuestionHistorySummary = {
   id: number
+  conversation_id: number | null
+  turn_index: number | null
   question_preview: string
   status: QuestionStatus
   answer_preview: string | null
   evidence_count: number
   created_at: string
   completed_at: string | null
+}
+
+export type ConversationStatus = 'active' | 'archived' | 'deleted'
+
+export type ConversationSummary = {
+  id: number
+  title: string
+  title_source: 'auto' | 'user'
+  status: ConversationStatus
+  turn_count: number
+  last_turn_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type ConversationDetail = {
+  conversation: ConversationSummary
+  turns: QuestionResult[]
 }
 
 export type AnalysisJob = {

@@ -15,12 +15,35 @@ class DocumentCreate(BaseModel):
     auto_analyze: bool = True
 
 
+class DocumentUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    content: str | None = Field(default=None, min_length=1)
+    auto_analyze: bool = True
+
+
 class ReanalyzeRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
     force_vector_reindex: bool = False
 
 
 class QuestionCreate(BaseModel):
+    question: str = Field(min_length=2, max_length=1000)
+    conversation_id: int | None = Field(default=None, ge=1)
+
+
+class QuestionRerunRequest(BaseModel):
+    question: str | None = Field(default=None, min_length=2, max_length=1000)
+
+
+class ConversationCreate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class ConversationUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
+class ConversationQuestionCreate(BaseModel):
     question: str = Field(min_length=2, max_length=1000)
 
 
@@ -163,15 +186,37 @@ class RetrievalResponse(BaseModel):
 
 class QuestionResultResponse(BaseModel):
     id: int
+    conversation_id: int | None = None
+    turn_index: int | None = None
     question: str
     status: str
     answer_markdown: str | None
+    answer_mode: str
     answer_language: str | None
     sources: list[QuestionSourceResponse]
     related_concepts: list[ConceptSummary]
     retrieval: RetrievalResponse
+    error: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
+    generated_document: DocumentSummary | None = None
     created_at: datetime
     completed_at: datetime | None
+
+
+class ConversationSummaryResponse(BaseModel):
+    id: int
+    title: str
+    title_source: str
+    status: str
+    turn_count: int
+    last_turn_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationDetailResponse(BaseModel):
+    conversation: ConversationSummaryResponse
+    turns: list[QuestionResultResponse]
 
 
 class QuestionHistorySummaryResponse(BaseModel):

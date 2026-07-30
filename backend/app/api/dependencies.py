@@ -34,7 +34,7 @@ def document_service() -> DocumentService:
 
 
 def question_service() -> QuestionService:
-    return QuestionService(RetrievalService(vector_store()), OpenAIResponsesGateway())
+    return QuestionService(RetrievalService(vector_store()), OpenAIResponsesGateway(), DocumentService(storage()))
 
 
 def graph_service() -> GraphService:

@@ -1,10 +1,16 @@
 from datetime import datetime, timezone
+from contextvars import ContextVar
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 T = TypeVar("T")
+request_id_context: ContextVar[str | None] = ContextVar("request_id", default=None)
+
+
+def current_request_id() -> str:
+    return request_id_context.get() or f"req_{uuid4().hex}"
 
 
 class PaginationMeta(BaseModel):
@@ -26,7 +32,7 @@ class ErrorPayload(BaseModel):
 class ResponseMeta(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    request_id: str = Field(default_factory=lambda: f"req_{uuid4().hex}")
+    request_id: str = Field(default_factory=current_request_id)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     pagination: PaginationMeta | None = None
     warnings: list[str] = Field(default_factory=list)

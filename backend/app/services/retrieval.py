@@ -43,7 +43,13 @@ class RetrievalService:
         hits: list[RetrievalHit] = []
         failures = 0
         for item in candidates:
-            document = session.exec(select(Document).where(Document.vector_store_file_id == item.file_id, Document.status == "ready")).first()
+            document = session.exec(
+                select(Document).where(
+                    Document.vector_store_file_id == item.file_id,
+                    Document.vector_store_status == "indexed",
+                    Document.status == "ready",
+                )
+            ).first()
             if document is None:
                 failures += 1
                 continue

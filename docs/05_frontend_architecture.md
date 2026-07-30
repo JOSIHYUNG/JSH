@@ -1,6 +1,7 @@
 # 05. Frontend Architecture
 
-- 문서 상태: Draft / Architecture baseline
+- 문서 상태: Reviewed / target architecture with runtime mapping
+- 시각 시스템의 canonical spec: `docs/design.md`
 - 기준 문서: `docs/PRD.md`, `docs/02_api_spec.md`, `docs/03_design_system.md`, `docs/04_backend_architecture.md`
 - runtime: React + TypeScript + Vite
 - 핵심 UX: 지식 그래프를 보면서 `AI에게 질문`하고, 답변 근거에서 원문으로 이동한다.
@@ -69,7 +70,8 @@ frontend/src/
 │  │  └─ conceptQueries.ts
 │  ├─ questions/
 │  │  ├─ QuestionBar.tsx
-│  │  ├─ QuestionResultPanel.tsx
+│  │  ├─ ChatPanel.tsx
+│  │  ├─ QuestionResultPanel.tsx (legacy)
 │  │  ├─ SourceCard.tsx
 │  │  ├─ QuestionHistoryPanel.tsx
 │  │  └─ questionQueries.ts
@@ -104,7 +106,19 @@ frontend/src/
    └─ integration/
 ```
 
-현재 `src/api/knowledge.ts`, `src/types/knowledge.ts`, `App.tsx`, `App.css`는 각각 resource API/domain types/features로 분리한다. 현재의 별도 search form과 document-only graph는 목표 구조로 교체한다.
+현재 구현은 `src/api/knowledge.ts`, `src/domain/knowledge.ts`, `App.tsx`, `src/styles/{tokens,globals,graph}.css`를 사용한다. 별도 search form은 없고 `AI에게 질문` 단일 진입으로 통합되어 있다. 멀티턴에서는 `ChatPanel`이 대화 turn과 turn별 source를 렌더링한다.
+
+### Runtime mapping
+
+| 목표 | 현재 | 다음 보완 |
+|---|---|---|
+| resource API modules/query hooks | 단일 `knowledgeApi` + `useKnowledgeController` | 기능 증가 시 resource별 client/query로 분리 |
+| analysis progress | SSE 우선 + REST polling fallback | preview payload 도입 시 reducer 확장 |
+| graph focus/filter | focus request, 기간·유형·강도 filter, fit/reset 연결 | 대형 graph 성능 계측 |
+| source offset highlight | range API와 citation/chunk 위치 강조 연결 | 완료 |
+| conversation actions | 대화 열기·turn 재실행·대화 삭제·제목 수정 | URL conversation 복원과 ChatPanel 연결 |
+| application resilience | root error boundary, 요청 timeout/abort, panel별 error | component 자동 테스트 추가 |
+| theme | OS 선호 초기값 + localStorage dark/light 전환 | 시각 회귀 자동화 |
 
 ## 3. 상태 분리
 
@@ -115,10 +129,11 @@ frontend/src/
 - `documents`: recent/list/detail.
 - `graphSnapshot`: filters/focus 기준 snapshot.
 - `conceptDetail`.
-- `questionHistory`.
-- `questionResult`.
+- `conversations`: recent list.
+- `conversationDetail`: metadata + ordered turns.
+- `questionResult`: legacy 단일 질문/현재 turn 결과.
 - `systemStatus`.
-- `analysisJob`과 preview events.
+- `analysisJob`; P1에서 추가할 preview events.
 
 server state는 query key와 invalidate policy를 가진다. 동일 데이터의 수동 복사본을 여러 component state에 두지 않는다.
 
@@ -128,9 +143,9 @@ server state는 query key와 invalidate policy를 가진다. 동일 데이터의
 
 | 상태 | 타입/예 | 설명 |
 |---|---|---|
-| `contextPanel` | `{kind, id} or null` | document/concept/question |
+| `contextPanel` | `{kind, id} or null` | document/concept/question/conversation |
 | `isAddModalOpen` | boolean | 자료 추가 modal |
-| `historyOpen` | boolean | 질문 기록 panel |
+| `historyOpen` | boolean | 대화 기록 panel |
 | `graphFilters` | object | node/concept/recent/strength |
 | `graphFocus` | `{type,id} or null` | selected focus |
 | `toastQueue` | Toast[] | 짧은 feedback |
@@ -142,6 +157,7 @@ server state는 query key와 invalidate policy를 가진다. 동일 데이터의
 - `source`: `empty/history/concept`.
 - `submittedAt`.
 - submit 상태는 server question query가 source of truth이며, local boolean만으로 표현하지 않는다.
+- `activeConversationId`: null이면 새 대화, 값이 있으면 후속 질문.
 
 ### 3.3 상태 machine
 
@@ -151,7 +167,7 @@ server state는 query key와 invalidate policy를 가진다. 동일 데이터의
 
 오류: `processing → failed`; 사용자 취소: `processing → canceled`; retry: `failed/canceled → processing`.
 
-#### Question
+#### Conversation question
 
 `idle → submitting → retrieving → generating → completed`
 
@@ -159,7 +175,9 @@ server state는 query key와 invalidate policy를 가진다. 동일 데이터의
 
 - `no_evidence`: completed가 아니라 별도 결과 상태로 렌더링.
 - network/provider error: `failed`, 입력값 보존.
-- rerun: 기존 history를 바꾸지 않고 새 question result 생성.
+- `no_evidence`: completed가 아니라 별도 결과 상태로 렌더링.
+- rerun: 기존 turn을 바꾸지 않고 같은 대화에 새 turn 생성.
+- 새 대화: active conversation을 비우고 첫 질문 전송 시 conversation 생성.
 
 ## 4. API client 규칙
 
@@ -173,6 +191,7 @@ server state는 query key와 invalidate policy를 가진다. 동일 데이터의
 - response JSON envelope decode.
 - non-2xx를 `ApiError`로 변환.
 - request ID를 error object에 보존.
+- timeout과 caller `AbortSignal`을 결합하고 network/timeout 오류를 표준 code로 변환.
 
 resource 함수는 `client.request<T>()`만 사용한다. component에서 raw `fetch`를 금지한다.
 
@@ -185,6 +204,7 @@ Backend DTO와 1:1로 맞추는 타입:
 - `ConceptSummary`, `ConceptDetail`, `ConceptRelation`.
 - `GraphSnapshot`, `GraphNode`, `GraphEdge`.
 - `QuestionResult`, `QuestionSource`, `QuestionHistorySummary`.
+- `ConversationSummary`, `ConversationDetail`, `ConversationTurn`.
 
 enum은 string union으로 선언하고 unknown enum은 `Unknown` fallback renderer를 갖는다. API가 새로운 concept type을 추가해도 전체 화면이 crash하지 않아야 한다.
 
@@ -219,20 +239,23 @@ render 규칙:
 | `system.status` | startup, job complete/fail |
 | `documents.list(filters)` | document ready/delete |
 | `documents.detail(id)` | analysis complete/reanalyze/delete |
+| `documents.update(id, payload)` | title-only immediate save, content edit → reanalysis |
 | `graph.snapshot(filters)` | document ready/delete, concept edit |
 | `concepts.detail(id)` | analysis complete, concept edit |
 | `questions.list(filters)` | question complete/rerun/delete |
 | `questions.detail(id)` | question complete |
+| `conversations.list()` | conversation create/turn complete/delete/rename |
+| `conversations.detail(id)` | turn complete/retry/delete/document stale update |
 
 ### Mutation 규칙
 
-- upload/paste success 202 후 해당 document detail/job을 polling 또는 SSE 구독.
+- upload/paste success 202 후 해당 document 분석 SSE를 우선 구독하고 연결 실패 시 REST polling으로 전환.
 - analysis completed → documents list/detail + graph snapshot invalidate.
 - delete 202 → 즉시 graph/list에서 optimistic hide, 실패 시 rollback + error.
 - question complete → result panel open + history list invalidate.
 - rerun → 기존 result 유지, 새 result를 active로 교체.
 
-질문 POST가 `202`와 `status=queued/retrieving/generating`을 반환하면 `QuestionResultPanel`은 `GET /questions/{id}`를 짧은 간격으로 polling한다. `completed/no_evidence/failed`에서 polling을 종료하고, 입력값과 기존 기록은 보존한다.
+질문 POST가 `202`와 `status=queued/retrieving/generating`을 반환하면 active `ChatPanel`은 `GET /questions/{id}` 또는 conversation detail을 짧은 간격으로 polling한다. `completed/no_evidence/failed`에서 polling을 종료하고, 입력값과 기존 turn은 보존한다.
 
 ## 6. App composition
 
@@ -264,7 +287,7 @@ render 규칙:
 
 ### 7.2 Graph
 
-`KnowledgeGraph`는 `react-force-graph-3d` adapter다. domain graph type을 library node/link type과 직접 섞지 않는다.
+`KnowledgeGraph`는 `react-force-graph-3d` adapter다. library가 node/link 객체를 mutation하므로 API snapshot을 clone한 뒤 simulation에 전달하고 domain snapshot은 불변으로 유지한다.
 
 adapter 책임:
 
@@ -280,6 +303,7 @@ adapter 책임:
 - chunk는 default 제외.
 - selection 변경 시 전체 graph를 재조회하지 않고 focus query만 실행.
 - graph data identity를 안정적으로 유지해 불필요한 simulation restart를 막는다.
+- 3D graph module은 `React.lazy`로 분리해 초기 shell bundle에서 제외한다. WebGL 엔진 chunk는 별도 산출물로 관리한다.
 - `requestAnimationFrame` 기반 custom animation을 추가하지 않고 library particle 기능을 저강도로 사용한다.
 
 접근성:
@@ -314,16 +338,18 @@ adapter 책임:
 
 ### 7.5 Questions
 
-`QuestionResultPanel` render 순서:
+`ChatPanel`은 active conversation을 오래된 turn부터 표시한다. 각 turn은 질문, 상태, 답변, citation marker, 관련 개념, 해당 turn의 source cards를 독립적으로 렌더링한다. 패널 하단 composer에서 바로 후속 질문을 보내며, 이전 turn은 답변 context로만 사용되고 현재 turn source와 섞지 않는다.
+
+`ChatPanel`의 turn render 순서:
 
 1. question header/status.
-2. answer markdown.
+2. 검증된 plain text answer와 citation marker.
 3. citation marker links.
 4. source cards 1~3.
 5. related concepts.
 6. retry/edit question actions.
 
-답변은 raw HTML을 허용하지 않고 markdown safe renderer를 사용한다. citation key가 source에 없는 경우 plain text로 노출하지 않고 validation error state로 보여준다.
+현재 답변은 raw HTML/임의 Markdown을 렌더링하지 않고 plain text와 검증된 citation marker만 표현한다. citation key가 source에 없거나 AI 생성이 실패하면 답변을 노출하지 않고 실패 상태와 검색된 근거 카드만 보여준다.
 
 `SourceCard`:
 
@@ -333,21 +359,22 @@ adapter 책임:
 
 `QuestionHistoryPanel`:
 
-- list query pagination.
-- click → detail query.
-- delete는 optimistic remove 후 실패 rollback.
-- rerun은 기존 history를 바꾸지 않는다.
+- conversation list query pagination.
+- click → conversation detail query.
+- 대화 삭제는 optimistic remove 후 실패 rollback.
+- turn rerun은 기존 turn을 바꾸지 않고 새 turn을 만든다.
+- 새 UI에서 개별 turn 삭제는 제공하지 않는다.
 
 ## 8. Analysis SSE
 
 `useAnalysisEvents(jobId)`:
 
 - EventSource URL을 API client base와 조합.
-- started/progress/preview/completed/failed/canceled를 reducer로 처리.
-- preview는 현재 modal state에만 반영하고 server detail cache에 임시 저장하지 않는다.
+- 현재는 started/progress/completed/failed/canceled를 처리한다. P1 preview event가 추가되면 reducer를 확장한다.
+- progress/completed/failed/canceled는 modal state에 반영한다. preview event를 추가하는 경우에도 server detail cache에 임시 저장하지 않는다.
 - completed event에서 document detail/list/graph query를 invalidate한다.
 - connection error는 즉시 실패로 단정하지 않고 exponential reconnect 후 REST detail로 최종 상태를 확인한다.
-- modal이 닫혀도 hook은 app-level job tracker가 유지할 수 있어야 한다. 최소 MVP에서는 recent document status polling으로 대체 가능.
+- modal을 닫아도 서버 작업은 취소되지 않으며 recent document 상태와 graph 재조회로 완료 결과를 회복한다. 사용자가 명시적으로 취소할 때만 cancel API를 호출한다.
 
 ## 9. Routing / URL 정책
 
@@ -357,6 +384,7 @@ MVP는 single-page layout으로 시작한다. 브라우저 새로고침 복원�
 
 - `?document=12`
 - `?concept=7`
+- `?conversation=12`
 - `?question=21`
 - `?focus=document:12`
 
@@ -391,7 +419,7 @@ URL에 원문·질문 전문을 넣지 않는다. 질문 history ID만 사용한
 - document detail long content는 chunk list pagination/lazy loading.
 - markdown answer는 큰 output에 max-height + expand.
 - file upload progress는 browser upload progress가 필요할 때만 XHR/fetch wrapper를 확장하고, 분석 progress와 혼동하지 않는다.
-- 이미지/3D asset을 추가하지 않는 MVP는 bundle size를 graph library 중심으로 관리한다.
+- 3D graph는 lazy chunk로 분리하고 shell bundle 예산을 별도로 관리한다. graph chunk 경고는 WebGL 엔진 특성상 허용하되 초기 상호작용을 막지 않아야 한다.
 
 ## 12. Test architecture
 
@@ -423,17 +451,24 @@ URL에 원문·질문 전문을 넣지 않는다. 질문 history ID만 사용한
 ### Visual
 
 - desktop/mobile viewport matrix from design system.
-- dark contrast, graph panel overlap, reduced motion.
+- dark/light contrast, graph panel overlap, reduced motion.
 - dense graph, no evidence, processing, stale evidence screenshots.
 
 ## 13. Current implementation migration checklist
 
-- [ ] `KnowledgeDocument/SearchResult/GraphNode`를 API DTO 전체 타입으로 교체.
-- [ ] `/knowledge/search` form을 제거하고 `/questions` single entry UI로 통합.
-- [ ] `getKnowledgeGraph`를 filter/focus graph snapshot query로 확장.
-- [ ] graph node를 document-only에서 document/chunk/concept discriminated node로 확장.
-- [ ] App.tsx를 AppShell/features/hooks로 분리.
-- [ ] `ensureOk`를 공통 envelope/error decoder로 교체.
-- [ ] upload를 text paste + file multipart modal로 확장.
-- [ ] `busy` 하나로 전체 화면을 잠그는 동작을 feature별 pending으로 교체.
-- [ ] SSE analysis preview와 question history panel 추가.
+2026-07-30 역검증 결과:
+
+- [x] API DTO 전체 타입과 표준 envelope decoder 사용.
+- [x] 별도 search form 제거, `/questions` 단일 질문 UI 사용.
+- [x] conversation/turn API와 `ChatPanel`을 연결하고 후속 질문 context를 유지한다.
+- [x] document/chunk/concept graph와 filter query 연결.
+- [x] upload text paste + `.txt/.md/.pdf` multipart 지원.
+- [x] feature별 question/document/panel pending 상태 사용.
+- [x] source range 조회·chunk highlight, graph focus, history rerun/delete action 연결.
+- [x] SSE progress/terminal event와 polling fallback을 modal 실제 stage에 연결.
+- [x] ErrorBoundary, API timeout/abort, OS theme 초기값과 dark/light 전환 구현.
+- [x] graph API snapshot clone, keyboard node list, reduced-motion particle 제한 구현.
+- [x] 3D graph를 lazy chunk로 분리해 초기 shell bundle을 축소.
+- [ ] resource별 query hook 분리와 URL 상태 복원을 추가한다. (P3)
+- [ ] component/integration/visual regression 자동 테스트를 추가한다. (P4)
+- [ ] 대형 graph에서 clustering 또는 서버 side subgraph pagination을 검토한다. (P4)

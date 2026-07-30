@@ -1,9 +1,10 @@
 # 03. Design System
 
-- 문서 상태: Draft / Architecture baseline
+- 문서 상태: Reviewed / token baseline
+- 시각 방향의 canonical spec: `docs/design.md`
 - 기준 문서: `docs/PRD.md`
 - 대상: 개인용 지식 탐색 서비스, desktop-first
-- 핵심 언어: 다크 우주·기술적·조용한 집중·근거가 보이는 탐색
+- 핵심 언어: 밝고 깊이감 있는 지식 우주·기술적·조용한 집중·근거가 보이는 탐색
 
 ## 1. 디자인 목표
 
@@ -44,21 +45,21 @@ App shell
 
 | 토큰 | 값 | 용도 |
 |---|---|---|
-| `surface.canvas` | `#07111E` | 전체 배경, 그래프 공간 |
-| `surface.canvas-alt` | `#0B1726` | section 구분 |
-| `surface.panel` | `#101D2D` | 카드·패널 |
-| `surface.panel-raised` | `#15253A` | hover·선택 패널 |
+| `surface.canvas` | `#0D1726` | 전체 배경, 그래프 공간 |
+| `surface.canvas-alt` | `#142238` | section 구분 |
+| `surface.panel` | `#192A40` | 카드·패널 |
+| `surface.panel-raised` | `#223750` | hover·선택 패널 |
 | `surface.overlay` | `rgba(4, 10, 18, .82)` | modal backdrop |
-| `surface.input` | `#0C1929` | 입력 배경 |
+| `surface.input` | `#101D31` | 입력 배경 |
 | `surface.disabled` | `#1B2A3A` | disabled |
 
 #### Text
 
 | 토큰 | 값 | 대비 목적 |
 |---|---|---|
-| `text.primary` | `#F4F8FC` | 제목·본문 |
-| `text.secondary` | `#B9C9D8` | 보조 설명 |
-| `text.muted` | `#8295A8` | 메타데이터 |
+| `text.primary` | `#F6F9FC` | 제목·본문 |
+| `text.secondary` | `#C9D6E4` | 보조 설명 |
+| `text.muted` | `#91A3B8` | 메타데이터 |
 | `text.inverse` | `#07111E` | accent 위 text |
 | `text.link` | `#7BE2D4` | 원문 이동·관련 link |
 
@@ -66,13 +67,13 @@ App shell
 
 | 토큰 | 값 | 용도 |
 |---|---|---|
-| `accent.teal` | `#73D6C8` | AI 질문, concept, primary action |
-| `accent.amber` | `#E6A86C` | document, highlight, caution |
-| `accent.violet` | `#A994FF` | relation, secondary emphasis |
-| `semantic.success` | `#69D49A` | completed/ready |
+| `accent.teal` | `#72DFCF` | AI 질문, concept, primary action |
+| `accent.amber` | `#F2BD7C` | document, highlight, caution |
+| `accent.violet` | `#B8A8FF` | relation, secondary emphasis |
+| `semantic.success` | `#7BE2A8` | completed/ready |
 | `semantic.info` | `#6CA8FF` | processing/status |
-| `semantic.warning` | `#F2C66D` | low confidence/partial |
-| `semantic.danger` | `#FF7F8F` | failed/delete |
+| `semantic.warning` | `#F5CF79` | low confidence/partial |
+| `semantic.danger` | `#FF8D9D` | failed/delete |
 | `border.default` | `rgba(172, 215, 236, .16)` | 일반 경계 |
 | `border.focus` | `#73D6C8` | keyboard focus |
 
@@ -81,6 +82,20 @@ App shell
 - 색만으로 상태를 구분하지 않는다. label/icon/text를 함께 사용한다.
 - `semantic.danger`는 삭제 확정·실패 행동에만 사용하고 그래프 장식에는 사용하지 않는다.
 - 그래프 색상은 `color_token` metadata로 받고 프론트가 token map에서 선택한다.
+
+라이트 테마 override:
+
+| 역할 | 값 |
+|---|---|
+| canvas / canvas-alt | `#F3F7FB` / `#E9F0F6` |
+| panel / panel-raised / input | `#FFFFFF` / `#F8FBFD` / `#F8FBFD` |
+| text primary / secondary / muted | `#102237` / `#40566D` / `#6B7F94` |
+| teal / amber / violet | `#168C83` / `#B76724` / `#6653C7` |
+| success / warning / danger | `#147A4F` / `#976100` / `#B5304A` |
+
+- 저장된 테마가 없으면 OS 선호를 사용하고, 선택값은 local storage에 보존한다.
+- 두 테마에서 semantic 의미와 graph node 유형은 바꾸지 않고 명도·채도만 조정한다.
+- 3D canvas 배경과 node/link palette도 테마 전환 즉시 함께 갱신한다.
 
 ### 3.2 개념 유형 색상
 
@@ -168,7 +183,8 @@ Graph node rules:
 - brand는 link가 아니라 home reset action.
 - `자료 추가`는 primary/teal.
 - `질문 기록`은 secondary.
-- status indicator는 `AI 연결됨`, `AI 연결 필요`, `처리 중`으로 텍스트 표시.
+- theme toggle은 현재 상태가 아니라 전환 결과를 accessible name으로 제공한다.
+- status indicator는 `AI 연결됨`, `로컬 모드`, `로컬 저장소 점검 필요`, `상태 확인 중`으로 텍스트 표시.
 - 좁은 화면에서는 status를 icon+tooltip으로 축약하되 accessible name을 유지한다.
 
 ### 4.3 QuestionBar
@@ -233,7 +249,7 @@ Question result panel:
 |---|---|---|
 | `idle` | paste/upload 선택 | source tabs, title, input |
 | `validating` | 입력 수정 불가 | validation message |
-| `processing` | cancel/close | stepper, progress, live preview |
+| `processing` | cancel/close | stepper, progress; P1에서 live preview 추가 |
 | `completed` | graph/document/undo | result summary |
 | `failed` | retry/keep draft/close | error reason + next action |
 | `canceled` | resume/retry/close | original retained notice |
@@ -245,11 +261,11 @@ Question result panel:
 - external processing notice는 submit action 위에 배치한다.
 - title 자동 제안은 editable input으로 제공한다.
 
-분석 preview:
+분석 preview(P1 목표):
 
-- 단계: 원문 저장, 전체 원문 AI index, 청크, 요약/키워드, concepts, relations, complete.
+- 단계: 원문 저장, 청크, 요약/키워드, concepts, relations, 로컬 complete. 전체 원문 AI index는 로컬 완료 후 별도 상태로 동기화.
 - concept row는 type badge + canonical name + `새 개념/기존 연결/유사 후보` 상태.
-- preview가 부분 결과일 때 `아직 저장 중`을 명시한다.
+- preview event가 구현되면 부분 결과에 `아직 저장 중`을 명시한다. 현재 runtime은 stage/progress만 표시한다.
 
 ### 4.7 SourceCard
 
@@ -328,17 +344,17 @@ Toast는 성공·일반 오류의 짧은 안내에만 사용한다. 분석 단�
 ## 9. Visual QA 기준
 
 - 1440×900, 1280×800, 768×1024, 390×844에서 overflow 없음.
-- 다크 배경 위 text.primary/secondary가 WCAG AA 수준의 대비를 갖는다.
+- 다크·라이트 배경 위 text.primary/secondary가 WCAG AA 수준의 대비를 갖는다.
 - graph node label이 panel·question bar를 덮지 않는다.
 - 답변 citation click → source card → document chunk highlight가 한 번의 명확한 transition으로 이어진다.
-- processing/failed/no evidence/stale/empty 상태를 데이터 없이도 mock 가능하다.
+- processing/failed/no evidence/stale/empty 상태는 production mock 없이 격리된 test fixture 또는 component harness에서 재현 가능해야 한다.
 - 고밀도 graph에서 node를 찾기 위한 filter와 focus action이 항상 노출된다.
 
 ## 10. Component acceptance checklist
 
-- [ ] 모든 primary action이 `AI에게 질문` 단일 흐름과 일치한다.
-- [ ] document/chunk/concept 상태와 디자인 token mapping이 API enum과 일치한다.
-- [ ] source card가 rank·citation·openable/stale를 모두 표현한다.
-- [ ] 3D graph fallback node list가 있다.
-- [ ] modal close/cancel/retry/undo 상태가 분리되어 있다.
-- [ ] reduced motion과 keyboard navigation을 확인했다.
+- [x] 모든 primary action이 `AI에게 질문` 단일 흐름과 일치한다.
+- [x] document/chunk/concept 상태와 디자인 token mapping이 API enum과 일치한다.
+- [x] source card가 rank·citation·openable/stale를 모두 표현한다.
+- [x] 3D graph fallback node list가 있다.
+- [ ] modal close/cancel/retry는 분리됨. 완료 직후 실행 취소(undo)는 P2.
+- [x] reduced motion과 keyboard node-list navigation을 구현했다. 실제 브라우저 접근성 회귀는 P4.

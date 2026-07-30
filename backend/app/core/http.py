@@ -1,4 +1,4 @@
-from collections.abc import Callable
+import logging
 from uuid import uuid4
 
 from fastapi import Request
@@ -8,9 +8,11 @@ from fastapi.responses import JSONResponse
 from app.core.envelope import ErrorPayload, failure
 from app.core.errors import DomainError
 
+logger = logging.getLogger(__name__)
+
 
 def get_request_id(request: Request) -> str:
-    return request.headers.get("X-Request-ID", f"req_{uuid4().hex}")
+    return getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID", f"req_{uuid4().hex}")
 
 
 async def domain_error_handler(request: Request, exc: DomainError) -> JSONResponse:
@@ -19,10 +21,19 @@ async def domain_error_handler(request: Request, exc: DomainError) -> JSONRespon
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    payload = failure(ErrorPayload(code="VALIDATION_ERROR", message="요청 값이 올바르지 않습니다.", details={"issues": exc.errors()}, retryable=False), request_id=get_request_id(request))
+    issues = [
+        {
+            "field": ".".join(str(part) for part in issue.get("loc", ())),
+            "reason": issue.get("msg", "invalid value"),
+            "type": issue.get("type", "validation_error"),
+        }
+        for issue in exc.errors()
+    ]
+    payload = failure(ErrorPayload(code="VALIDATION_ERROR", message="요청 값이 올바르지 않습니다.", details={"fields": issues}, retryable=False), request_id=get_request_id(request))
     return JSONResponse(status_code=422, content=payload.model_dump(mode="json"), headers={"X-Request-ID": payload.meta.request_id})
 
 
 async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled request failure: %s %s", request.method, request.url.path, exc_info=exc)
     payload = failure(ErrorPayload(code="INTERNAL_ERROR", message="서버에서 처리하지 못했습니다.", retryable=True), request_id=get_request_id(request))
     return JSONResponse(status_code=500, content=payload.model_dump(mode="json"), headers={"X-Request-ID": payload.meta.request_id})

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -16,6 +17,7 @@ class Document(SQLModel, table=True):
     media_type: str = Field(default="text/plain", max_length=120)
     storage_key: str = Field(max_length=500, unique=True)
     title: str = Field(max_length=255)
+    title_source: str = Field(default="pending", max_length=20)
     summary: str = ""
     content_hash: str = Field(max_length=64, index=True)
     character_count: int = 0
@@ -134,17 +136,42 @@ class AnalysisJob(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
-class QuestionHistory(SQLModel, table=True):
-    __tablename__ = "question_histories"
+class ChatConversation(SQLModel, table=True):
+    __tablename__ = "chat_conversations"
 
     id: int | None = Field(default=None, primary_key=True)
+    title: str = Field(max_length=255)
+    title_source: str = Field(default="auto", max_length=20)
+    status: str = Field(default="active", index=True, max_length=20)
+    turn_count: int = 0
+    last_turn_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    deleted_at: datetime | None = None
+
+
+class QuestionHistory(SQLModel, table=True):
+    __tablename__ = "question_histories"
+    __table_args__ = (UniqueConstraint("conversation_id", "turn_index", name="uq_question_history_conversation_turn"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    conversation_id: int | None = Field(default=None, foreign_key="chat_conversations.id", index=True)
+    turn_index: int | None = Field(default=None, index=True)
     question: str
     status: str = Field(default="queued", index=True, max_length=30)
     answer_markdown: str | None = None
+    answer_mode: str = Field(default="grounded", max_length=20)
     answer_language: str | None = Field(default=None, max_length=10)
     model_name: str | None = Field(default=None, max_length=120)
+    retrieval_provider: str = Field(default="none", max_length=30)
+    retrieval_candidate_count: int = 0
+    retrieval_mapping_failures: int = 0
     retrieval_count: int = 0
     citation_count: int = 0
+    retrieval_query: str | None = None
+    context_turn_count: int = 0
+    context_truncated: bool = False
+    generated_document_id: int | None = Field(default=None, foreign_key="documents.id", index=True)
     error_code: str | None = Field(default=None, max_length=80)
     error_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now, index=True)

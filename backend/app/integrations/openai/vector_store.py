@@ -18,7 +18,9 @@ class OpenAIVectorStoreGateway:
 
     @property
     def configured(self) -> bool:
-        return get_openai_client() is not None
+        # OpenAI Vector Store IDs use the `vs_` prefix. Treat a placeholder or
+        # malformed env value as unavailable so local analysis can continue.
+        return get_openai_client() is not None and (not self.vector_store_id or self.vector_store_id.startswith("vs_"))
 
     def ensure_store(self) -> str | None:
         client = get_openai_client()
@@ -35,8 +37,11 @@ class OpenAIVectorStoreGateway:
         store_id = self.ensure_store()
         if client is None or store_id is None:
             raise RuntimeError("OpenAI Vector Store is not configured")
+        # Keep provider latency bounded. Local SQLite/FTS analysis is the
+        # authoritative fallback when indexing is unavailable.
+        client = client.with_options(timeout=20.0, max_retries=0)
         with path.open("rb") as handle:
-            vector_file = client.vector_stores.files.upload_and_poll(vector_store_id=store_id, file=handle)
+            vector_file = client.vector_stores.files.upload_and_poll(vector_store_id=store_id, file=handle, poll_interval_ms=1000)
         return vector_file.id, getattr(vector_file, "status", "completed")
 
     def search(self, query: str, limit: int = 3) -> list[VectorSearchItem]:

@@ -95,6 +95,7 @@ offset 기반 MVP를 사용한다. SQLite 단일 사용자 규모에서 예측 �
 | 502 | `VECTOR_STORE_NOT_READY` | Vector Store indexing 실패/지연 | Y |
 | 503 | `AI_NOT_CONFIGURED` | API key 또는 Vector Store 설정 없음 | N |
 | 503 | `SERVICE_NOT_READY` | DB·파일 저장소·설정 초기화 실패 | Y |
+| 503 | `SERVICE_RESTARTED` | 서버 재시작으로 process-local 작업 중단 | Y |
 
 field validation은 `error.details.fields` 배열의 `{field, reason, value}`로 반환한다. `value`에는 API key·원문 전체·민감한 내용을 넣지 않는다.
 
@@ -107,7 +108,7 @@ field validation은 `error.details.fields` 배열의 `{field, reason, value}`로
 | `id` | integer | Y | 문서 ID |
 | `title` | string | Y | 대표 제목 |
 | `filename` | string or null | Y | 파일명 또는 null |
-| `source_type` | enum | Y | `paste/upload` |
+| `source_type` | enum | Y | `paste/upload/ai_generated` |
 | `media_type` | string | Y | MIME |
 | `summary` | string | Y | 짧은 요약 |
 | `keywords` | string[] | Y | 우선순위 순 |
@@ -190,6 +191,7 @@ field validation은 `error.details.fields` 배열의 `{field, reason, value}`로
 | `sources` | QuestionSource[] | 실제 사용 근거 0~3개 |
 | `related_concepts` | ConceptSummary[] | 질문·근거에서 연결된 개념 |
 | `retrieval` | object | count, scores, mapping status |
+| `error` | object or null | `failed`일 때 code/message/retryable |
 | `created_at` | datetime | 실행 시각 |
 | `completed_at` | datetime or null | 완료 시각 |
 
@@ -231,6 +233,7 @@ field validation은 `error.details.fields` 배열의 `{field, reason, value}`로
 | POST | `/documents` | 붙여넣기 자료 등록/분석 시작 | 202 |
 | POST | `/documents/upload` | 텍스트 파일 등록/분석 시작 | 202 |
 | GET | `/documents/{document_id}` | 문서 상세 | 200 |
+| PATCH | `/documents/{document_id}` | 제목/본문 수정 | 202 |
 | DELETE | `/documents/{document_id}` | 문서 삭제 시작 | 202 |
 | POST | `/documents/{document_id}/reanalyze` | 재분석 시작 | 202 |
 | GET | `/documents/{document_id}/analysis/events` | 분석 SSE | 200 stream |
@@ -238,7 +241,13 @@ field validation은 `error.details.fields` 배열의 `{field, reason, value}`로
 | GET | `/documents/{document_id}/chunks/{chunk_id}` | 청크 상세 | 200 |
 | GET | `/documents/{document_id}/original` | 원문 구간 조회 | 200 |
 | GET | `/concepts/{concept_id}` | 개념 상세 | 200 |
-| POST | `/questions` | 유일한 사용자 질문 진입점 | 201/202 |
+| POST | `/conversations` | 명시적 대화 생성 | 201 |
+| GET | `/conversations` | 대화 목록 | 200 |
+| GET | `/conversations/{conversation_id}` | 대화와 turn 상세 | 200 |
+| PATCH | `/conversations/{conversation_id}` | 대화 제목 수정 | 200 |
+| DELETE | `/conversations/{conversation_id}` | 대화와 turn/source 삭제 | 204 |
+| POST | `/conversations/{conversation_id}/questions` | 대화 후속 질문 | 202 |
+| POST | `/questions` | 기존 단일 질문 호환 진입점 | 202 |
 | GET | `/questions` | 질문 기록 목록 | 200 |
 | GET | `/questions/{question_id}` | 질문 기록 상세 | 200 |
 | POST | `/questions/{question_id}/rerun` | 질문 재실행 | 202 |
@@ -281,9 +290,7 @@ Query:
 | 파라미터 | 타입 | 기본 | 설명 |
 |---|---|---:|---|
 | `status` | enum[] | all | comma-separated `draft,processing,ready,failed,deleting` |
-| `source_type` | enum | all | `paste/upload` |
-| `created_from` | date | none | UTC 날짜 이상 |
-| `created_to` | date | none | UTC 날짜 이하 |
+| `source_type` | enum | all | `paste/upload/ai_generated` |
 | `sort` | enum | `created_at` | `created_at/title/updated_at` |
 | `order` | enum | desc | asc/desc |
 | `page`, `page_size` | integer | 1,20 | pagination |
@@ -302,6 +309,8 @@ Request body:
 | `content` | string | Y | trim 후 1자 이상 |
 | `source_name` | string or null | N | 사용자 표시용 파일명 |
 | `auto_analyze` | boolean | N | 기본 true |
+
+사용자가 `title`을 전달하면 사용자 확정 제목으로 저장하며 분석·재분석이 덮어쓰지 않는다. 생략한 경우에만 분석 제목을 적용한다.
 
 처리:
 
@@ -324,6 +333,8 @@ Request: `multipart/form-data`.
 | `file` | binary | Y | `.txt`, `.md` P0. PDF는 설정으로 허용할 때만 |
 | `title` | string | N | 자동 제안 override |
 | `auto_analyze` | boolean | N | 기본 true |
+
+multipart `title`도 사용자 확정 제목으로 취급한다.
 
 헤더/검증:
 
@@ -352,6 +363,23 @@ Response `data`:
 - `concepts`: ConceptSummary[]
 - `latest_job`: AnalysisJob 또는 null
 - `source`: `{storage_available, vector_store_status}`
+
+### PATCH `/documents/{document_id}`
+
+자료의 제목 또는 원문을 수정한다. 제목만 바꾸면 즉시 저장하고, 원문이 바뀌면 기존 분석 결과를 폐기하지 않고 문서를 `processing`으로 전환해 새 분석 job을 시작한다.
+
+Request body:
+
+| 필드 | 타입 | 필수 | 설명 |
+|---|---|---:|---|
+| `title` | string or null | N | trim 후 1~255자. 생략 시 기존 제목 유지 |
+| `content` | string or null | N | 원문 전체. 입력 시 1자 이상 |
+| `auto_analyze` | boolean | N | 본문 변경 시 기본 true. false면 `draft`로 저장 |
+
+- `title`과 `content` 중 하나 이상은 입력해야 한다.
+- 원문 hash가 다른 활성 문서와 같으면 `409 DUPLICATE_DOCUMENT`.
+- 수정 중인 문서의 원문·그래프·질문 retrieval은 새 분석 완료 전까지 사용하지 않는다.
+- 응답은 `document`와 `job`을 반환하며, 제목만 수정하면 `job=null`이다.
 
 ### DELETE `/documents/{document_id}`
 
@@ -382,32 +410,14 @@ SSE event types:
 
 | event | data 필드 | 설명 |
 |---|---|---|
-| `analysis.started` | job_id, document_id, stage, progress | 연결 직후 현재 상태도 replay |
-| `analysis.progress` | job_id, stage, progress, message, counts | 단계 진행 |
-| `analysis.preview` | job_id, kind, payload | title/summary/concept/relation의 안전한 preview |
-| `analysis.completed` | job_id, document_id, document_status | 완료와 최신 document summary |
-| `analysis.failed` | job_id, error | retry action 정보 |
-| `analysis.canceled` | job_id, document_id | 원문 draft/failed 상태 |
+| `analysis.started` | job_id, document_id, stage, progress, message | 연결 직후 queued 현재 상태 replay |
+| `analysis.progress` | job_id, document_id, stage, progress, message | 단계 또는 진행률 변경 |
+| `analysis.completed` | job_id, document_id, stage, progress, message | 로컬 분석 완료 |
+| `analysis.failed` | 공통 필드 + `error {code,message}` | 재시도 가능한 실패 정보 |
+| `analysis.canceled` | job_id, document_id, stage, progress, message | 원문 보존 상태 |
 | `heartbeat` | server_time | 15초 idle keepalive |
 
-`analysis.preview.data` 공통 필드:
-
-| 필드 | 타입 | 설명 |
-|---|---|---|
-| `job_id` | integer | 작업 ID |
-| `kind` | enum | `title`, `summary`, `keyword`, `concept`, `relation` |
-| `sequence` | integer | job 내 증가 순번 |
-| `payload` | object | kind별 안전한 preview |
-
-kind별 payload:
-
-- `title`: `{title}`.
-- `summary`: `{summary}`.
-- `keyword`: `{keyword, rank}`.
-- `concept`: `{concept_type, canonical_name, english_name, abbreviation, description, state}`. `state`는 `new/existing/similar_candidate`.
-- `relation`: `{source_name, target_name, relation_type, strength, evidence_chunk_index}`.
-
-preview에는 원문 전체·API key·provider raw response를 넣지 않는다.
+현재 SSE는 확정된 job 진행 상태만 제공한다. 제목·요약·개념 preview event는 schema와 개인정보 노출 검토 후 P3에서 별도 버전으로 추가하며, 현재 client가 이를 전제로 구현해서는 안 된다.
 
 클라이언트가 연결을 끊어도 작업은 계속된다. `Last-Event-ID`는 MVP에서는 필수가 아니며, 재연결 시 현재 job 상태와 최근 결과를 다시 전송한다.
 
@@ -495,6 +505,34 @@ Response `data`: `GraphSnapshot`.
 
 ## 10. Questions
 
+### Conversation endpoints
+
+대화는 질문과 답변 turn의 컨테이너다. 기본 UI는 빈 대화를 먼저 만들지 않고 첫 질문 전송 시 대화를 자동 생성한다. 대화 context는 최근 완료 turn 최대 6개와 prompt 예산을 사용하며, 매 turn의 RAG 검색은 전체 지식베이스에서 새로 수행한다.
+
+#### `POST /conversations`
+
+명시적으로 대화를 만든다. Request body는 `{title?: string}`이며 title을 생략하면 첫 질문 전송 시 자동 제목을 만든다.
+
+#### `GET /conversations`
+
+Query: `page`, `page_size`. 최근 활동순 `ConversationSummary[]`를 반환한다.
+
+#### `GET /conversations/{conversation_id}`
+
+대화 metadata와 `turn_index` 순서의 `ChatTurn[]`를 반환한다. 각 turn은 기존 `QuestionResult`의 질문·답변·retrieval·sources를 포함한다.
+
+#### `PATCH /conversations/{conversation_id}`
+
+Request body: `{title: string}`. 자동 제목을 사용자 제목으로 교체하고 `title_source=user`로 저장한다.
+
+#### `DELETE /conversations/{conversation_id}`
+
+대화의 turn과 `question_sources` snapshot을 삭제한다. 문서·개념·다른 대화에는 영향을 주지 않는다. 성공은 `204 No Content`다.
+
+#### `POST /conversations/{conversation_id}/questions`
+
+Request body: `{question: string}`. 대화에 새 turn을 추가한다. 진행 상태는 `queued/retrieving/generating`, terminal 상태는 `completed/no_evidence/failed`다. 오래 걸리는 경우 `202`를 반환하며 `GET /questions/{turn_id}` 또는 conversation detail을 polling한다.
+
 ### POST `/questions`
 
 사용자에게 노출되는 유일한 검색/AI 질문 진입점이다. 키워드 입력도 질문으로 취급한다.
@@ -504,21 +542,22 @@ Request body:
 | 필드 | 타입 | 필수 | 기본 | 설명 |
 |---|---|---:|---:|---|
 | `question` | string | Y |  | 2~1,000자 |
+| `conversation_id` | integer | N | null | 지정하면 해당 대화의 후속 turn. 없으면 새 대화 자동 생성 |
 
 처리 순서:
 
 1. 유효성·빈 지식공간 확인.
-2. 질문 history를 queued로 생성.
-3. OpenAI Vector Store에서 전체 원문 기준 관련 결과를 최대 3개 retrieval.
-4. provider result content를 local document/chunk와 mapping.
-5. 매핑된 근거만 Responses API에 제공.
-6. 답변의 citation marker와 source rank를 검증.
-7. history/source snapshot 저장 후 completed 반환.
+2. conversation context를 조립하고 follow-up이면 standalone retrieval query를 생성.
+3. 질문 history turn을 queued로 생성.
+4. 사용 가능한 경우 OpenAI Vector Store에서 전체 원문 기준 관련 결과를 최대 3개 retrieval하고, 미구성·오류·매핑 실패 시 SQLite FTS5로 fallback.
+5. provider result content를 local document/chunk와 mapping.
+6. 이전 turn context와 현재 turn의 매핑 근거만 Responses API에 제공.
+7. OpenAI가 구성된 경우에만 답변을 생성하고 현재 turn source의 citation marker와 source rank를 검증. AI 미구성·생성 실패는 근거와 `failed/error`를 반환하며 정상 답변으로 위장하지 않는다.
+8. history/source snapshot과 conversation metadata를 저장 후 반환.
 
 Response:
 
-- 동기 완료: `201 Created`, `data=QuestionResult`.
-- 처리 시간이 길어 timeout 전에 전환하면 `202 Accepted`, `data=QuestionResult`이며 status는 `queued/retrieving/generating`이다. 클라이언트는 반환된 `id`로 `GET /questions/{question_id}`를 polling한다. 질문 전용 SSE는 MVP 범위에 포함하지 않는다.
+- `202 Accepted`, `data=QuestionResult`이며 최초 status는 `queued`이다. 클라이언트는 반환된 `id`로 `GET /questions/{question_id}`를 polling한다. 질문 전용 SSE와 동기 `201` 응답은 MVP 범위에 포함하지 않는다.
 
 답변 규칙:
 
@@ -529,7 +568,7 @@ Response:
 
 ### GET `/questions`
 
-Query: `page`, `page_size`, `status`, `created_from`, `created_to`, `sort=created_at`, `order=desc`.
+Query: `page`, `page_size`. 현재 구현은 최신 생성순으로 반환한다.
 
 Response items:
 
@@ -542,6 +581,8 @@ Response items:
 | `evidence_count` | integer |
 | `created_at` | datetime |
 | `completed_at` | datetime or null |
+| `conversation_id` | integer or null |
+| `turn_index` | integer or null |
 
 ### GET `/questions/{question_id}`
 
@@ -588,7 +629,7 @@ SSE 규칙:
 - `Content-Type: text/event-stream`.
 - event data는 JSON object.
 - heartbeat interval 15초.
-- 서버가 이벤트를 보낼 때마다 `id`를 monotonic job event sequence로 부여한다.
+- 연결 내에서 이벤트를 보낼 때마다 증가하는 `id`를 부여한다. 영속 event log가 아니므로 `Last-Event-ID` 재생을 보장하지 않는다.
 - 연결이 끊겨도 DB 상태가 source of truth다.
 
 ## 12. OpenAI 연동 계약
@@ -598,8 +639,8 @@ SSE 규칙:
 ### 12.1 Vector Store
 
 - 원문 asset 전체를 Vector Store 파일로 등록한다.
-- `documents.vector_store_file_id`에 외부 file ID를 보관한다.
-- indexing 완료 전에는 `ready`로 승격하지 않는다.
+- `documents.vector_store_file_id`에 현재 외부 file ID를 보관한다.
+- 로컬 원문·청크·FTS·개념 저장 완료가 `documents.status=ready`의 기준이다. Vector indexing은 그 뒤 진행하며 `vector_store_status=uploading/indexed/failed`로 분리한다.
 - provider 검색 결과에는 `file_id`, score, content, attributes가 들어온다고 가정하고 local document와 매핑한다.
 - 파일 삭제·재등록은 idempotency 기준으로 처리하고 DB status에 반영한다.
 
@@ -609,7 +650,7 @@ SSE 규칙:
 - 답변: 검색된 최대 3개 local evidence를 명시적 context로 전달하고, citation key를 요구한다.
 - API key는 backend 환경변수에서만 읽는다.
 - model 이름·reasoning effort·verbosity는 settings로 주입하며 문서에 특정 모델 ID를 고정하지 않는다.
-- provider timeout·429·5xx는 표준 error로 변환하고, 원문/질문을 잃지 않으며 retryable을 true로 표시한다.
+- provider timeout·429·5xx는 표준 error로 변환하고, 원문·질문·검색된 근거를 잃지 않으며 retryable을 true로 표시한다.
 
 ## 13. CORS·보안·캐시
 
@@ -629,3 +670,25 @@ SSE 규칙:
 - 질문 결과의 source rank/citation key/local chunk mapping이 일치한다.
 - 삭제된 문서가 graph·new question retrieval에 나오지 않고, old question history snapshot은 열린다.
 - 질문 기록 rerun은 기존 기록을 수정하지 않는다.
+
+## 15. Runtime conformance audit (2026-07-30)
+
+이 절은 목표 계약과 현재 FastAPI 구현을 역검증한 결과다. 구현되지 않은 목표 필드는 프론트에서 호출하지 않으며, 기능을 추가할 때 목표 계약을 먼저 구현한다.
+
+| 영역 | 현재 동작 | 보완 우선순위 |
+|---|---|---|
+| document create/upload | `202 Accepted`, `document + job`, `.txt/.md/.pdf` | P0 동작. PDF는 텍스트 추출만 지원 |
+| document list | `status`, `source_type`, `page`, `page_size`, `sort`, `order` | `created_from/to`는 미구현. 프론트에서 전송하지 않음 |
+| analysis SSE | 현재 상태 replay, 변경 progress, 15초 heartbeat, event id, terminal event 제공. 프론트는 SSE 우선·polling fallback | 제목·요약·개념·관계 preview payload는 P1 잔여 |
+| document detail | chunk pagination·concept list 제공, 원문은 `/original` range API | P0 동작 |
+| graph | `include_chunks`, `node_types`, `concept_types`, `min_strength`, `recent_days`, `focus_type/id`, limits 지원 | 프론트 필터·focus·fit·keyboard node list 연결 완료. layout 저장은 P3 |
+| question create | 멀티턴 conversation/turn, 장시간 `202 + GET polling` | 기존 단일 질문은 `conversation_id` 없이 자동 conversation 생성 |
+| question list | `page`, `page_size` 지원 | status/date/sort 필터는 P2 |
+| rerun/delete | rerun은 기존 또는 수정 질문으로 새 기록 생성, delete는 `204` | 프론트 action 연결 완료 |
+
+### Frontend contract rules
+
+- `knowledgeApi`는 성공 envelope의 `data`만 반환하고 오류는 `code/message/retryable`로 변환한다.
+- 문서 생성 완료는 HTTP 응답 수신이 아니라 `document.status=ready` 확인 후로 간주한다. Vector index 상태는 별도로 표시한다.
+- Vector Store 미설정·실패 시 로컬 FTS fallback을 provider 값으로 표시한다. OpenAI 미구성·생성 실패는 `status=failed`, `answer_markdown=null`로 표시하며 근거 카드만 제공할 수 있다.
+- 질문 source의 `document_id`, `chunk_id`, `start_char`, `end_char`는 원문 range 조회와 연결한다.

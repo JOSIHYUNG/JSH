@@ -1,6 +1,6 @@
 # 01. Database Model
 
-- 문서 상태: Draft / Architecture baseline
+- 문서 상태: Reviewed / runtime contract
 - 기준 문서: `docs/PRD.md`
 - 대상: FastAPI + SQLModel + SQLite + Alembic
 - 목적: 문서·청크·개념 그래프·질문 기록·분석 작업을 재현 가능하게 저장하고, 로컬 단일 사용자 MVP에서 확장 가능한 데이터 경계를 정의한다.
@@ -28,10 +28,18 @@ Document 1 ─── N AnalysisJob
 Concept 1 ─── N ConceptAlias
 Concept 1 ─── N ConceptRelation ─── 1 Concept
 ConceptRelation N ─── 1 DocumentChunk (evidence)
-QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentChunk
+ChatConversation 1 ─── N QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentChunk
 ```
 
-### 2.1 사용자에게 보이는 객체와 저장 객체
+### 2.1 Runtime 검증 결과
+
+- 실제 SQLModel/Alembic head는 문서·청크·FTS5·개념·alias·relation·분석 job·질문 history/source snapshot을 사용한다.
+- 원문은 `backend/data/storage/`에 저장하고 `documents.storage_key`로 참조한다. DB의 임시 분석 필드는 원문 source of truth가 아니다.
+- Vector Store indexing 실패 시 현재 구현은 로컬 원문·FTS·분석 결과를 보존하고 로컬 검색 가능한 `ready`로 남길 수 있다. `ready`는 외부 Vector Store 성공을 절대 전제하지 않으며, 외부 상태는 `vector_store_status`로 확인한다.
+- `active_job_id`는 현재 migration에서 논리적 참조이며 DB foreign key가 아니다. job 일관성은 service 계층에서 검증한다.
+- 스키마 변경은 SQLModel 수정만으로 끝내지 않고 Alembic revision과 empty/current DB upgrade 테스트를 함께 추가한다.
+
+### 2.2 사용자에게 보이는 객체와 저장 객체
 
 | 사용자 객체 | 저장 객체 | 비고 |
 |---|---|---|
@@ -41,7 +49,8 @@ QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentCh
 | 개념의 다른 이름 | `concept_aliases` | 한글명·영문명·약어와 출처 |
 | 개념 간 연결 | `concept_relations` | 관계명·강도·근거 청크 |
 | 분석 진행 | `analysis_jobs` | SSE와 재시도 기준 |
-| AI 질문/기록 | `question_histories` | 답변과 당시 근거 snapshot |
+| 대화 | `chat_conversations` | 대화 제목·상태·최근 활동 |
+| AI 질문/turn 기록 | `question_histories` | turn별 질문·답변과 당시 근거 snapshot |
 | 답변 참고 자료 | `question_sources` | 삭제·재분석 뒤에도 표시 가능 |
 
 ## 3. 공통 규칙
@@ -66,7 +75,7 @@ QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentCh
 
 - `draft`: 원문은 임시 보관되었지만 그래프·질문에 사용하지 않는다.
 - `processing`: 분석 작업이 진행 중이다.
-- `ready`: 원문·청크·개념·Vector Store 등록이 모두 조회 가능한 상태다.
+- `ready`: 로컬 원문·청크·FTS·개념·관계가 조회 가능한 상태다. Vector Store 상태는 별도 필드로 판단한다.
 - `failed`: 원문은 보존되며 분석 재시도가 가능하다.
 - `deleting`: 사용자에게 숨겨지고 정리 작업 중이다.
 - `deleted`: 논리 상태 기록이 필요한 경우에만 남기며 기본 조회에서는 제외한다.
@@ -77,7 +86,9 @@ QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentCh
 
 #### AnalysisStage
 
-`received`, `stored`, `vector_store_uploading`, `vector_store_ready`, `chunking`, `summarizing`, `extracting_concepts`, `linking_concepts`, `finalizing`, `completed`
+`received`, `stored`, `chunking`, `summarizing`, `extracting_concepts`, `linking_concepts`, `finalizing`, `completed`, `failed`, `canceled`
+
+Vector Store 등록은 로컬 분석 job 완료 뒤 별도 `documents.vector_store_status`로 추적하므로 분석 progress stage에 섞지 않는다.
 
 #### ConceptType
 
@@ -100,11 +111,12 @@ QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentCh
 | 컬럼 | SQLite 타입 | Null | 기본값/제약 | 설명 |
 |---|---|---:|---|---|
 | `id` | INTEGER | N | PK | 문서 ID |
-| `source_type` | TEXT | N | enum | `paste` 또는 `upload` |
+| `source_type` | TEXT | N | enum | `paste`, `upload`, `ai_generated` |
 | `original_filename` | TEXT | Y | max 255 | 업로드 원본 파일명. 붙여넣기는 null 가능 |
 | `media_type` | TEXT | N | `text/plain` 등 | 원문 형식 |
 | `storage_key` | TEXT | N | unique | 실제 파일 시스템 경로가 아닌 상대 키 |
 | `title` | TEXT | N | max 255 | 자동 추출 후 사용자 수정 가능 |
+| `title_source` | TEXT | N | `pending/generated/user` | 사용자 확정 제목의 재분석 덮어쓰기 방지 |
 | `summary` | TEXT | N | empty string | 짧은 핵심 요약 |
 | `content_hash` | TEXT | N | unique among active | 원문 SHA-256. 중복 감지 |
 | `character_count` | INTEGER | N | >= 1 | 정규화된 원문 길이 |
@@ -112,7 +124,7 @@ QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentCh
 | `analysis_version` | INTEGER | N | 0 | 성공한 분석 버전. 최초 완료 1 |
 | `active_job_id` | INTEGER | Y | FK | 현재 작업. 완료 시 null |
 | `vector_store_file_id` | TEXT | Y | index | OpenAI Vector Store에 등록된 파일 ID |
-| `vector_store_status` | TEXT | N | `not_uploaded` | `not_uploaded`, `uploading`, `indexed`, `failed`, `deleting`, `deleted` |
+| `vector_store_status` | TEXT | N | `not_uploaded` | `not_uploaded`, `stale`, `uploading`, `indexed`, `failed`, `deleting`, `deleted` |
 | `vector_store_error_code` | TEXT | Y |  | 외부 오류 분류 코드만 저장 |
 | `created_at` | TEXT | N | UTC | 생성 시각 |
 | `updated_at` | TEXT | N | UTC | 마지막 변경 시각 |
@@ -120,10 +132,18 @@ QuestionHistory 1 ─── N QuestionSourceSnapshot N ─── 0..1 DocumentCh
 
 규칙:
 
-- `status=ready`일 때 `storage_key`, `character_count`, `analysis_version`, 청크 1개 이상, Vector Store indexed를 보장한다.
+- `status=ready`일 때 `storage_key`, `character_count`, `analysis_version`, 청크 1개 이상과 FTS 반영을 보장한다. Vector Store는 `indexed`가 아니어도 되며 질문은 로컬 FTS로 degraded 동작한다.
 - `content_hash`는 `deleted` 문서와 비교하지 않는다. 삭제 후 같은 원문을 재등록할 수 있다.
 - 원문 파일은 `documents/{id}/original/{safe-filename}`에 두며 `storage_key`는 이 논리 키만 가진다.
 - `active_job_id`는 최대 하나다. 재분석 시 기존 작업을 종료한 뒤 새 작업을 연결한다.
+
+수정 규칙:
+
+- 제목 수정은 `title`, `updated_at`만 변경하며 분석 버전을 증가시키지 않는다.
+- 사용자가 제목을 입력·수정하면 `title_source=user`로 고정하고 이후 재분석은 제목을 덮어쓰지 않는다. 제목을 생략한 신규 문서는 `pending`, 첫 분석 제목 적용 후 `generated`다.
+- 원문 수정은 새 hash·character count·storage asset을 기록하고 `analysis_version`을 증가시킨다.
+- 원문 수정 중에는 `status=processing` 또는 `draft`이며, 새 분석 성공 시 기존 청크·키워드·근거 관계를 새 결과로 교체한다.
+- 질문 history의 source snapshot은 원문 수정과 무관하게 당시 내용을 보존한다.
 
 인덱스:
 
@@ -308,28 +328,56 @@ PK는 `(chunk_id, concept_id, mention)`으로 한다. 같은 청크에서 같은
 
 인덱스: `(document_id, created_at DESC)`, `(status, created_at)`.
 
-### 4.10 `question_histories`
+### 4.10 `chat_conversations`
 
-`AI에게 질문` 실행 하나를 저장한다. 멀티턴 대화는 저장하지 않는다.
+하나의 멀티턴 대화를 저장한다. 계정·workspace FK는 두지 않는다.
 
 | 컬럼 | SQLite 타입 | Null | 설명 |
 |---|---|---:|---|
 | `id` | INTEGER | N | PK |
+| `title` | TEXT | N | 자동 생성 또는 사용자 수정 제목 |
+| `title_source` | TEXT | N | `auto` 또는 `user` |
+| `status` | TEXT | N | `active`, `archived`, `deleted` |
+| `turn_count` | INTEGER | N | 저장된 turn 수 |
+| `last_turn_at` | TEXT | Y | 마지막 turn 시각 |
+| `created_at` | TEXT | N | UTC |
+| `updated_at` | TEXT | N | UTC |
+| `deleted_at` | TEXT | Y | 삭제 시각 |
+
+index: `(status, last_turn_at DESC)`.
+
+대화 삭제는 해당 turn과 source snapshot을 함께 삭제하며 문서·개념 데이터에는 영향을 주지 않는다.
+
+### 4.11 `question_histories`
+
+대화 안의 질문 1개와 그에 대한 답변을 하나의 turn으로 저장한다. 기존 단일 질문 기록도 migration에서 1개 대화의 1번 turn으로 backfill한다.
+
+| 컬럼 | SQLite 타입 | Null | 설명 |
+|---|---|---:|---|
+| `id` | INTEGER | N | PK |
+| `conversation_id` | INTEGER | Y | FK → chat_conversations, legacy 호환을 위해 초기 nullable |
+| `turn_index` | INTEGER | Y | 대화 안 순서, 1부터 시작 |
 | `question` | TEXT | N | 2~1,000자 |
 | `status` | TEXT | N | QuestionStatus |
 | `answer_markdown` | TEXT | Y | 완료된 답변 |
 | `answer_language` | TEXT | Y | 질문 언어 판정 결과 |
 | `model_name` | TEXT | Y | 생성에 사용한 모델 식별자 |
+| `retrieval_provider` | TEXT | N | `vector_store`, `lexical_fallback`, `none` |
+| `retrieval_candidate_count` | INTEGER | N | provider가 반환한 후보 수 |
+| `retrieval_mapping_failures` | INTEGER | N | local chunk로 연결하지 못한 후보 수 |
 | `retrieval_count` | INTEGER | N | 실제 근거 수 |
 | `citation_count` | INTEGER | N | 답변에 사용된 citation 수 |
+| `retrieval_query` | TEXT | Y | 실제 검색에 사용한 standalone query |
+| `context_turn_count` | INTEGER | N | 답변 생성에 사용한 이전 완료 turn 수 |
+| `context_truncated` | INTEGER | N | context 예산으로 절단되었는지 |
 | `error_code` | TEXT | Y | 실패 분류 |
 | `error_message` | TEXT | Y | 사용자 안전 메시지 |
 | `created_at` | TEXT | N | 질문 실행 시각 |
 | `completed_at` | TEXT | Y | 답변 완료 시각 |
 
-질문 완료 전에 `status=queued/retrieving/generating`을 저장하고, UI가 기록을 새로고침해도 진행 상태를 표시할 수 있게 한다.
+질문 완료 전에 `status=queued/retrieving/generating`을 저장하고, UI가 기록을 새로고침해도 진행 상태를 표시할 수 있게 한다. index는 `(conversation_id, turn_index)`, `(status, created_at)`를 사용하고 `(conversation_id, turn_index)`는 unique로 둔다.
 
-### 4.11 `question_sources`
+### 4.12 `question_sources`
 
 질문 당시의 근거를 snapshot으로 보존한다. 문서 삭제·재분석이 질문 기록을 망가뜨리지 않게 하는 핵심 테이블이다.
 
@@ -394,7 +442,7 @@ backend/data/
 4. 분석 결과의 concepts/aliases/chunk_concepts/relations 저장.
 5. `documents.status=ready`, `analysis_jobs.completed`를 같은 DB transaction에서 commit.
 
-Vector Store 등록은 외부 side effect이므로 DB transaction 안에서 network call을 수행하지 않는다. 외부 등록 상태는 job 단계로 기록하고, 실패 시 로컬 원문은 `failed`로 보존한다.
+Vector Store 등록은 외부 side effect이므로 DB transaction 안에서 network call을 수행하지 않는다. 로컬 결과를 `ready`로 commit한 뒤 외부 등록을 시도하며, 실패하면 문서는 `ready`, `vector_store_status=failed`로 남겨 FTS 질문과 재색인을 허용한다.
 
 ### 6.2 재분석
 
@@ -423,8 +471,9 @@ DB 모델과 API response 모델은 분리한다. 다음 read model을 repositor
 | `ChunkEvidence` | chunk id, document id, index, preview/content, offsets, score, citation key |
 | `ConceptDetail` | concept fields + aliases + source chunks + related concepts |
 | `GraphSnapshot` | nodes, edges, truncation metadata, applied filters |
-| `QuestionResult` | question, answer, source evidence, related concepts, retrieval metadata |
-| `QuestionHistorySummary` | id, question preview, status, answer preview, evidence count, created_at |
+| `QuestionResult` | question, answer, source evidence, related concepts, retrieval metadata, conversation/turn metadata |
+| `ConversationDetail` | conversation summary + ordered question turns |
+| `QuestionHistorySummary` | id, conversation id, turn index, question preview, status, answer preview, evidence count, created_at |
 
 ## 8. Alembic migration 정책
 
@@ -432,7 +481,7 @@ DB 모델과 API response 모델은 분리한다. 다음 read model을 repositor
 - 모델 변경 후 migration 생성 → 빈 DB upgrade → 기존 DB upgrade → downgrade 가능성 검토 순서로 검증한다.
 - FTS5 virtual table·trigger는 일반 SQLModel metadata만으로 안전하게 생성하지 말고 migration의 explicit SQL로 관리한다.
 - 데이터 변환이 필요한 migration은 schema migration과 분리한다.
-- 현재 MVP의 `documents.content`, `keywords_json`, `embedding_json`에서 목표 모델로 이동할 때는 다음 순서를 따른다.
+- 현재 head는 `20260730_0005`다. 과거 `documents.content`, `keywords_json`, `embedding_json`에서 목표 모델로 이동할 때는 다음 순서를 따른다.
   1. 신규 컬럼/테이블 생성.
   2. 기존 원문을 `storage/`로 이동하고 hash/metadata 입력.
   3. 기존 내용으로 chunks/FTS 생성.
@@ -446,6 +495,8 @@ DB 모델과 API response 모델은 분리한다. 다음 read model을 repositor
 - 개념 한글명/영문명/약어 exact normalized match → 기존 개념 재사용.
 - 부분 일치/분류 불일치 → 자동 병합 없음.
 - 질문 결과 3개 → `question_sources.rank=1..3`, citation `S1..S3`.
+- 기존 질문 기록 migration → 기존 row마다 conversation 1개와 `turn_index=1` 생성.
+- 같은 대화 후속 질문 → 완료 turn만 context로 사용하고 turn index를 증가시킨다.
 - 문서 삭제 후 질문 기록 → snapshot 렌더링, 현재 문서 link는 비활성/상태 표시.
 - FTS row 삭제 후 질문 결과 → deleted 문서가 다시 선택되지 않음.
 - 분석 중 프로세스 재시작 → running job이 recoverable retry 상태로 전환.

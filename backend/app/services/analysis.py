@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
-from pathlib import Path
 
+from openai import OpenAIError
 from sqlmodel import Session, delete, select
 
 from app.core.config import get_settings
@@ -9,7 +9,7 @@ from app.db import engine
 from app.integrations.filesystem.storage import LocalFileStorage
 from app.integrations.openai.responses import ExtractedConcept, ExtractedRelation, OpenAIResponsesGateway
 from app.integrations.openai.vector_store import OpenAIVectorStoreGateway
-from app.models import AnalysisJob, AppSetting, ChunkConcept, Concept, ConceptAlias, ConceptRelation, Document, DocumentChunk, DocumentKeyword
+from app.models import AnalysisJob, AppSetting, ChunkConcept, Concept, ConceptAlias, ConceptRelation, Document, DocumentChunk, DocumentKeyword, QuestionSource
 from app.services.jobs import now, update_job
 
 
@@ -47,13 +47,27 @@ class AnalysisWorkflow:
                     job.status = "failed"
                     job.stage = "failed"
                     job.progress = min(job.progress, 99)
-                    job.error_code = "ANALYSIS_OUTPUT_INVALID" if isinstance(exc, (ValueError, KeyError)) else "INTERNAL_ERROR"
-                    job.error_message = "자료 분석에 실패했습니다. 다시 시도해 주세요."
+                    if isinstance(exc, OpenAIError):
+                        job.error_code = "OPENAI_UNAVAILABLE"
+                        job.error_message = "AI 분석 서비스에 연결하지 못했습니다. 원문은 보존되었으며 다시 시도할 수 있습니다."
+                    elif isinstance(exc, (ValueError, KeyError)):
+                        job.error_code = "ANALYSIS_OUTPUT_INVALID"
+                        job.error_message = "AI 분석 결과를 검증하지 못했습니다. 원문은 보존되었으며 다시 시도할 수 있습니다."
+                    else:
+                        job.error_code = "INTERNAL_ERROR"
+                        job.error_message = "자료 분석에 실패했습니다. 원문은 보존되었으며 다시 시도할 수 있습니다."
                     job.completed_at = now()
                     job.updated_at = now()
                     session.add(job)
                 if document:
-                    document.status = "failed"
+                    has_current_result = self._existing_result_matches_original(session, document)
+                    document.status = "ready" if has_current_result else "failed"
+                    if (
+                        has_current_result
+                        and document.vector_store_file_id
+                        and document.vector_store_status == "stale"
+                    ):
+                        document.vector_store_status = "indexed"
                     document.active_job_id = None
                     document.updated_at = now()
                     session.add(document)
@@ -67,51 +81,121 @@ class AnalysisWorkflow:
                 return
             update_job(session, job_id, status="running", stage="stored", progress=5, message="원문을 확인했습니다.")
             content = self.storage.read(document.storage_key)
-            if self.vector_store.configured:
-                update_job(session, job_id, stage="vector_store_uploading", progress=15, message="AI 검색 저장소에 원문을 등록하고 있습니다.")
-                try:
-                    file_id, _ = self.vector_store.upload_and_poll(self.storage.root / document.storage_key, document.original_filename or "document.txt")
-                    document.vector_store_file_id = file_id
-                    document.vector_store_status = "indexed"
-                except Exception:
-                    document.vector_store_status = "failed"
-                    document.vector_store_error_code = "OPENAI_UNAVAILABLE"
-                session.add(document)
-                if document.vector_store_status == "indexed":
-                    store_setting = session.get(AppSetting, "vector_store_id")
-                    if store_setting is None:
-                        session.add(AppSetting(key="vector_store_id", value=self.vector_store.vector_store_id or "", updated_at=now()))
-                    else:
-                        store_setting.value = self.vector_store.vector_store_id or store_setting.value
-                        store_setting.updated_at = now()
-                        session.add(store_setting)
-                session.commit()
-            else:
-                document.vector_store_status = "not_uploaded"
-                session.add(document)
-                session.commit()
+            session.refresh(document)
+            if document.status == "deleting":
+                return
             update_job(session, job_id, stage="chunking", progress=25, message="원문을 근거 청크로 나누고 있습니다.")
             chunks = [ChunkResult(index=i, start=start, end=end, content=chunk) for i, (start, end, chunk) in enumerate(chunk_text(content))]
+            if self._cancel_if_requested(session, job_id, document.id or 0):
+                return
             analysis = self.responses.analyze_document(document.original_filename or document.title, content)
             update_job(session, job_id, stage="summarizing", progress=35, message="제목·요약·키워드를 추출했습니다.")
+            if self._cancel_if_requested(session, job_id, document.id or 0):
+                return
             for chunk in chunks:
                 update_job(session, job_id, stage="extracting_concepts", progress=min(80, 40 + int(35 * (chunk.index + 1) / max(len(chunks), 1))), message=f"청크 {chunk.index + 1}/{len(chunks)}의 개념을 연결하고 있습니다.")
                 chunk.concepts = self.responses.extract_concepts(chunk.index, chunk.content)
-                if not chunk.concepts:
+                if not chunk.concepts and not self.responses.configured:
                     chunk.concepts = self._fallback_concepts(chunk.content, analysis.keywords)
                 chunk.relations = self.responses.extract_relations(chunk.index, chunk.content, chunk.concepts)
+                if self._cancel_if_requested(session, job_id, document.id or 0):
+                    return
             update_job(session, job_id, stage="finalizing", progress=85, message="분석 결과를 저장하고 있습니다.")
+            session.refresh(document)
+            if document.status == "deleting":
+                return
             self._commit_result(session, document, job, content, analysis.title, analysis.summary, analysis.keywords, chunks)
+            self._index_vector_store(session, document)
+
+    def _index_vector_store(self, session: Session, document: Document) -> None:
+        """Index after local analysis is ready so provider latency cannot block ingestion."""
+        if not self.vector_store.configured:
+            return
+        old_file_id = document.vector_store_file_id
+        document.vector_store_status = "uploading"
+        document.vector_store_error_code = None
+        session.add(document)
+        session.commit()
+        try:
+            file_id, _ = self.vector_store.upload_and_poll(
+                self.storage.root / document.storage_key,
+                document.original_filename or "document.txt",
+            )
+            session.refresh(document)
+            if document.status == "deleting":
+                try:
+                    self.vector_store.delete(file_id)
+                except Exception:
+                    pass
+                return
+            if old_file_id and old_file_id != file_id:
+                try:
+                    self.vector_store.delete(old_file_id)
+                except Exception:
+                    # The old file no longer maps to this document and cannot be
+                    # returned as current evidence. Provider cleanup can be retried.
+                    pass
+            document.vector_store_file_id = file_id
+            document.vector_store_status = "indexed"
+            store_setting = session.get(AppSetting, "vector_store_id")
+            if store_setting is None and self.vector_store.vector_store_id:
+                session.add(AppSetting(key="vector_store_id", value=self.vector_store.vector_store_id, updated_at=now()))
+            elif store_setting is not None and self.vector_store.vector_store_id:
+                store_setting.value = self.vector_store.vector_store_id
+                store_setting.updated_at = now()
+                session.add(store_setting)
+        except Exception:
+            session.refresh(document)
+            if document.status == "deleting":
+                return
+            document.vector_store_status = "failed"
+            document.vector_store_error_code = "OPENAI_UNAVAILABLE"
+        session.add(document)
+        session.commit()
+
+    @staticmethod
+    def _cancel_if_requested(session: Session, job_id: int, document_id: int) -> bool:
+        job = session.get(AnalysisJob, job_id)
+        document = session.get(Document, document_id)
+        if not job or not document:
+            return True
+        session.refresh(job)
+        session.refresh(document)
+        if document.status == "deleting":
+            return True
+        if job.status != "cancel_requested":
+            return False
+        has_existing_result = session.exec(
+            select(DocumentChunk.id).where(DocumentChunk.document_id == document_id).limit(1)
+        ).first() is not None
+        job.status = "canceled"
+        job.stage = "canceled"
+        job.message = "분석을 취소했습니다. 원문은 보존되었습니다."
+        job.completed_at = now()
+        job.updated_at = now()
+        document.status = "ready" if has_existing_result else "draft"
+        document.active_job_id = None
+        document.updated_at = now()
+        session.add(job)
+        session.add(document)
+        session.commit()
+        return True
 
     def _commit_result(self, session: Session, document: Document, job: AnalysisJob, content: str, title: str, summary: str, keywords: list[str], chunks: list[ChunkResult]) -> None:
         old_chunks = session.exec(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
         old_chunk_ids = [row.id for row in old_chunks if row.id is not None]
         if old_chunk_ids:
+            stale_sources = session.exec(select(QuestionSource).where(QuestionSource.chunk_id.in_(old_chunk_ids))).all()
+            for source in stale_sources:
+                source.current_state = "document_reanalyzed"
+                session.add(source)
             session.exec(delete(ChunkConcept).where(ChunkConcept.chunk_id.in_(old_chunk_ids)))
             session.exec(delete(ConceptRelation).where(ConceptRelation.evidence_chunk_id.in_(old_chunk_ids)))
             session.exec(delete(DocumentChunk).where(DocumentChunk.id.in_(old_chunk_ids)))
         session.exec(delete(DocumentKeyword).where(DocumentKeyword.document_id == document.id))
-        document.title = title[:255] or document.title
+        if document.title_source != "user":
+            document.title = title[:255] or document.title
+            document.title_source = "generated"
         document.summary = summary[:1000]
         document.character_count = len(content)
         document.analysis_version = job.analysis_version
@@ -124,7 +208,7 @@ class AnalysisWorkflow:
             if value:
                 session.add(DocumentKeyword(document_id=document.id or 0, normalized_keyword=normalize_name(value), keyword=value[:255], rank=rank, source="ai" if get_settings().openai_api_key else "fallback", created_at=now()))
         concept_by_mention: dict[tuple[int, str], int] = {}
-        relation_keys: set[tuple[int, int, str]] = set()
+        relation_keys: set[tuple[int, int, str, int]] = set()
         for chunk_result in chunks:
             chunk = DocumentChunk(document_id=document.id or 0, chunk_index=chunk_result.index, start_char=chunk_result.start, end_char=chunk_result.end, content=chunk_result.content, character_count=len(chunk_result.content), content_hash=sha256_text(chunk_result.content), created_at=now())
             session.add(chunk)
@@ -142,12 +226,13 @@ class AnalysisWorkflow:
                 source = concept_by_mention.get((chunk_result.index, normalize_name(relation.source_mention)))
                 target = concept_by_mention.get((chunk_result.index, normalize_name(relation.target_mention)))
                 if source and target and source != target:
-                    relation_key = (source, target, normalize_name(relation.relation_type))
+                    relation_key = (source, target, normalize_name(relation.relation_type), chunk.id or 0)
                     if relation_key in relation_keys:
                         continue
                     relation_keys.add(relation_key)
                     session.add(ConceptRelation(source_concept_id=source, target_concept_id=target, relation_type=relation.relation_type[:80], is_directed=True, strength=max(0.5, relation.confidence), extraction_confidence=relation.confidence, explanation=relation.explanation[:500], evidence_chunk_id=chunk.id, visibility="visible", created_at=now(), updated_at=now()))
         self._sync_fts(session, document, chunks, keywords)
+        self._sync_concept_visibility(session)
         job.status = "completed"
         job.stage = "completed"
         job.progress = 100
@@ -156,6 +241,39 @@ class AnalysisWorkflow:
         job.updated_at = now()
         session.add(job)
         session.commit()
+
+    @staticmethod
+    def _sync_concept_visibility(session: Session) -> None:
+        used_ids = {
+            concept_id
+            for concept_id in session.exec(select(ChunkConcept.concept_id)).all()
+            if concept_id is not None
+        }
+        for concept in session.exec(select(Concept)).all():
+            next_visibility = "visible" if concept.id in used_ids else "orphaned"
+            if concept.visibility != "hidden" and concept.visibility != next_visibility:
+                concept.visibility = next_visibility
+                concept.updated_at = now()
+                session.add(concept)
+
+    def _existing_result_matches_original(self, session: Session, document: Document) -> bool:
+        """Return true only when the retained chunks still describe the current asset."""
+        chunks = session.exec(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_id == document.id)
+            .order_by(DocumentChunk.chunk_index)
+        ).all()
+        if not chunks:
+            return False
+        try:
+            content = self.storage.read(document.storage_key)
+        except (OSError, ValueError):
+            return False
+        return all(
+            0 <= chunk.start_char <= chunk.end_char <= len(content)
+            and content[chunk.start_char:chunk.end_char] == chunk.content
+            for chunk in chunks
+        )
 
     def _get_or_create_concept(self, session: Session, extracted: ExtractedConcept) -> Concept:
         candidates = [extracted.canonical_name, extracted.english_name or "", extracted.abbreviation or "", extracted.mention]
@@ -182,6 +300,9 @@ class AnalysisWorkflow:
             session.flush()
         else:
             changed = False
+            if concept.visibility == "orphaned":
+                concept.visibility = "visible"
+                changed = True
             if extracted.english_name and not concept.english_name:
                 concept.english_name = extracted.english_name[:255]
                 changed = True

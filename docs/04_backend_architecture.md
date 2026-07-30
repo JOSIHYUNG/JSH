@@ -1,6 +1,6 @@
 # 04. Backend Architecture
 
-- 문서 상태: Draft / Architecture baseline
+- 문서 상태: Reviewed / target architecture with runtime mapping
 - 기준 문서: `docs/PRD.md`, `docs/01_database_model.md`, `docs/02_api_spec.md`, `docs/external/openai.md`
 - runtime: Python 3.12, FastAPI, SQLModel, Alembic
 - 목표: 단일 로컬 프로세스에서 단순하게 시작하되, provider·저장소·분석 workflow를 교체 가능한 경계로 분리한다.
@@ -122,7 +122,18 @@ backend/
 └─ data/
 ```
 
-현재 `app/db.py`, `app/api/routes/knowledge.py`, `app/services/knowledge.py`는 목표 구조로 이동한다. 기존 API를 유지해야 하는 기간에는 compatibility router를 둘 수 있지만 신규 기능은 목표 resource route만 사용한다.
+현재 구현은 `app/db.py`, `app/api/routes/knowledge_v1.py`, `app/services/{documents,analysis,graph,questions,retrieval,jobs,read_models}.py`로 구성된다. 이 문서는 목표 모듈 경계를 설명하며 현재 차이는 아래에 기록한다.
+
+### Runtime mapping
+
+| 목표 경계 | 현재 구현 | 판정 |
+|---|---|---|
+| resource routes | `knowledge_v1.py` | 단일 resource router. 기능 증가 시 route module 분리 |
+| repositories | 일부 service 내부 SQLModel query | MVP 허용. query 복잡도 증가 시 분리 |
+| durable analysis | `AnalysisWorkflow` + `BackgroundTasks` + `analysis_jobs` | DB 상태는 durable하며 재시작 시 중단 job을 실패 처리해 복구 가능 상태로 전환 |
+| OpenAI ports | `integrations/openai/{client,responses,vector_store}.py` | provider 호출 경계 준수 |
+| SSE | `/documents/{id}/analysis/events` | 현재 상태 replay, 변경 progress, event ID, heartbeat, terminal event 구현 |
+| response envelope | `app/core/envelope.py` | 구현됨. 204 delete만 body 없음 |
 
 ## 3. Layer별 규칙
 
@@ -154,8 +165,9 @@ service는 use case 하나를 중심으로 만든다.
 | `AnalysisWorkflow` | 단계별 AI 분석·chunk·concept·relation·commit |
 | `GraphService` | filters/focus/limits로 graph read model 생성 |
 | `RetrievalService` | FTS 보정 + Vector Store search + local mapping |
-| `QuestionService` | question 생성, grounded answer, source snapshot |
-| `HistoryService` | 목록/detail/rerun/delete |
+| `ConversationContextService` | 완료 turn 조회, context window/절단, standalone query context |
+| `QuestionService` | conversation turn 생성, grounded answer, source snapshot |
+| `HistoryService` | 대화/turn 목록·상세·재실행·삭제 |
 | `DeletionService` | hide → external delete → local cleanup |
 
 service 메서드는 request schema가 아니라 domain input을 받는 것을 원칙으로 한다. HTTP pagination/filter parsing은 route 또는 query object가 담당한다.
@@ -196,8 +208,8 @@ unit test에서는 fake 구현을 사용한다. SDK response 타입을 service�
 | `STORAGE_ROOT` | `./data/storage` | local file root |
 | `OPENAI_API_KEY` | 선택 | 미설정 시 AI 단계는 명확한 degraded 상태 |
 | `OPENAI_VECTOR_STORE_ID` | 선택 | 단일 Vector Store. 없으면 필요 시 생성 여부 설정 |
-| `OPENAI_CHAT_MODEL` | env required/default registry | Responses 모델 |
-| `OPENAI_EMBEDDING_MODEL` | env/optional | local lexical fallback용인 경우에만 |
+| `OPENAI_CHAT_MODEL` | `gpt-5.6-terra` | Responses 분석·답변 모델. 환경변수로 교체 |
+| `OPENAI_TIMEOUT_SECONDS` | 60 | 개별 OpenAI 요청 timeout |
 | `MAX_UPLOAD_BYTES` | 20 MB 권장 | 애플리케이션 제한 |
 | `CORS_ORIGINS` | local frontend origin | allowlist |
 | `ANALYSIS_TIMEOUT_SECONDS` | 300 | 외부 작업 timeout |
@@ -217,8 +229,8 @@ unit test에서는 fake 구현을 사용한다. SDK response 타입을 service�
 3. storage root 생성/권한 확인.
 4. SQLite engine 생성, WAL/foreign key/busy timeout PRAGMA 설정.
 5. migration version 확인. 앱이 자동으로 migration을 실행하지 않는 운영 모드도 지원하되 개발 실행 명령은 `alembic upgrade head`로 고정한다.
-6. job runner와 in-memory event broker 시작.
-7. `queued/running/cancel_requested` job recovery scan.
+6. `queued/running/cancel_requested` job recovery scan. 기존 결과가 있으면 문서는 `ready`, 없으면 `failed`로 복구하고 job에 `SERVICE_RESTARTED`를 기록한다.
+7. in-process background task 실행 준비.
 8. routers mount.
 
 ### Shutdown 순서
@@ -238,24 +250,24 @@ unit test에서는 fake 구현을 사용한다. SDK response 타입을 service�
 |---|---|---|
 | received | request와 원문 검증 | draft, progress 0 |
 | stored | temp → final asset, hash | storage key |
-| vector_store_uploading | 전체 원문 upload | provider file ID |
-| vector_store_ready | indexing poll | vector status indexed |
 | chunking | 24,000/500 chunk | chunks + FTS |
 | summarizing | title/summary/keywords structured output | document fields |
 | extracting_concepts | chunk별 concepts/aliases | concepts + aliases + association |
 | linking_concepts | explicit relations, merge candidates | relations |
-| finalizing | counts, validation, status | ready/completed |
+| finalizing | chunks/FTS/keywords/concepts/relations 원자적 교체 | document `ready`, job `completed` |
+| vector_store_uploading | 전체 원문 upload·index poll | document vector status `uploading` → `indexed` 또는 `failed` |
 
-각 단계 완료 때 job row를 commit하고 event broker에 publish한다. UI는 이벤트를 잃어도 DB의 현재 stage로 복구한다.
+로컬 분석과 그래프·FTS 적재가 완료되면 문서와 job을 먼저 완료 처리한다. Vector Store 동기화는 그 뒤의 best-effort 단계이며, 실패해도 로컬 문서의 `ready` 상태를 되돌리지 않는다. 각 단계 완료 때 job row를 commit한다. SSE는 DB 상태를 source of truth로 읽으므로 연결이 끊겨도 재접속 또는 polling으로 복구한다.
 
 ### 6.2 AI 분석 정책
 
-- 전체 원문은 Vector Store에 전달한다.
+- 전체 원문은 로컬 분석 성공 후 Vector Store에 전달한다.
 - 내부 graph/evidence chunk는 독립적으로 분석하되, output이 과도하면 chunk를 의미 단위로 나누어 여러 호출한다. 고정된 concept hard cap은 두지 않는다.
 - structured output schema는 `DocumentAnalysis`, `ChunkConceptExtraction`, `ChunkRelationExtraction`로 분리한다.
 - concept description은 짧게, canonical/English/abbreviation을 명시적으로 요구한다.
 - 모델 output schema 검증 실패는 해당 단계 retry 후 `ANALYSIS_OUTPUT_INVALID`로 종료한다.
-- 외부 AI 실패는 원문과 draft를 보존하고 `failed`로 전환한다.
+- API key가 구성된 환경에서 Responses 분석이 실패하면 단순 키워드 fallback으로 성공한 것처럼 처리하지 않고 원문을 보존한 채 `failed`로 전환한다.
+- API key가 없는 로컬 모드에서만 제한된 결정적 fallback 분석을 허용하며, system status에서 AI 미연결을 명확히 표시한다.
 
 구조화 출력 계약:
 
@@ -266,14 +278,16 @@ unit test에서는 fake 구현을 사용한다. SDK response 타입을 service�
 | concept item | `concept_type`, `canonical_name`, `english_name`, `abbreviation`, `description`, `mention`, `mention_start`, `mention_end`, `confidence` | 13개 enum 중 하나; 위치는 chunk 기준 |
 | `ChunkRelationExtraction` | `chunk_index`, `relations[]` | `source_mention`, `target_mention`, `relation_type`, `explanation`, `confidence` |
 
-concept extraction 결과는 chunk별로 독립 처리하고, merge/alias 판단은 model output을 그대로 신뢰하지 않고 `ConceptService`가 정규화 규칙으로 재검증한다. relation의 source/target이 concepts에 매핑되지 않으면 저장하지 않고 preview에서 unresolved로 표시한다.
+concept extraction 결과는 chunk별로 독립 처리하고, merge/alias 판단은 model output을 그대로 신뢰하지 않고 `ConceptService`가 정규화 규칙으로 재검증한다. relation의 source/target이 concepts에 매핑되지 않으면 저장하지 않는다. 제외 수 집계는 P1 품질 관측 항목이다.
 
 ### 6.3 commit strategy
 
 - 분석 결과를 기존 active result와 동일 transaction에서 섞지 않는다.
-- MVP는 새 결과를 workflow context에 모은 뒤 final transaction에서 active 결과를 교체한다. 단계별 DB commit은 job 상태·progress·provider ID·안전한 preview만 대상으로 한다.
+- MVP는 새 결과를 workflow context에 모은 뒤 final transaction에서 active 결과를 교체한다. 단계별 DB commit은 job 상태·progress·provider ID만 대상으로 한다.
 - 분석 결과를 DB에 부분 저장하지 않으므로 실패 시 orphan chunk/concept를 정리할 필요가 없다. 원문과 job만 `failed`로 남긴다.
 - final transaction에서 chunks/FTS/keywords/concepts/relations, document status, counts, job status를 함께 변경한다.
+- 동일 원문 재분석 실패 시 기존 chunk가 현재 원문과 정확히 일치하면 기존 `ready` 결과를 유지한다. 원문 수정 후 분석 실패처럼 기존 chunk가 현재 asset과 불일치하면 `failed`로 두어 오래된 근거를 노출하지 않는다.
+- `title_source=user`인 제목은 분석 결과로 덮어쓰지 않는다.
 
 ## 7. Vector Store / Responses 연동
 
@@ -294,12 +308,11 @@ Vector Store가 반환한 `file_id/content/score`를 다음 순서로 local chun
 4. mapping confidence가 threshold 미만이면 source에 `mapping_unavailable`를 기록하고 답변 context에서 제외한다.
 5. local chunk 최대 3개를 rank로 고정하고 document link는 중복 제거한다.
 
-검색 후보 결합:
+검색 후보 선택:
 
-- Vector Store가 정상인 경우 provider score를 0~1로 normalize한다.
-- FTS5는 title/content/keyword match의 lexical 보정 후보를 만든다.
-- 동일 chunk가 양쪽에 있으면 semantic score를 우선하고 lexical match를 작은 보정값으로 더한다.
-- provider 결과가 없거나 mapping이 모두 실패하면 FTS 후보를 사용하되 `retrieval.provider=lexical_fallback`으로 표시한다.
+- Vector Store가 정상이고 indexed local file mapping이 있으면 semantic 결과를 우선한다.
+- Vector Store가 비활성·실패했거나 mapping 가능한 결과가 없으면 FTS5를 실행하고 `retrieval_provider=lexical_fallback`으로 기록한다.
+- 현재 MVP는 두 provider의 점수를 혼합하지 않는다. 추후 혼합 검색을 도입하면 score calibration과 회귀 평가를 먼저 정의한다.
 - 관련도 threshold 미만 후보는 3개를 채우기 위해 추가하지 않는다.
 
 이 매핑이 있어야 답변 citation이 application의 `/documents/{id}`와 chunk 위치로 이동할 수 있다. provider citation을 그대로 사용자 link로 사용하지 않는다.
@@ -314,19 +327,24 @@ Vector Store가 반환한 `file_id/content/score`를 다음 순서로 local chun
 ## 8. Question workflow
 
 ```text
-POST /questions
-  → validate question
-  → create question_history(queued)
+POST /conversations/{id}/questions or POST /questions
+  → validate question and conversation
+  → create question_history turn(queued)
+  → assemble recent completed context (max 6 + budget)
+  → rewrite follow-up to standalone retrieval query
   → retrieval (Vector Store + lexical fallback)
   → map to local chunks
   → no evidence? no_evidence
-  → Responses grounded answer
-  → validate citations
+  → Responses grounded answer with history context + current evidence
+  → validate current-turn citations
   → save source snapshots + completed
-  → return QuestionResult
+  → update conversation metadata
+  → return ChatTurn/QuestionResult
 ```
 
-질문에 외부 AI가 연결되지 않아도 원문/DB는 보존한다. configured false이면 source retrieval이 가능한 경우 `AI_NOT_CONFIGURED` degraded result를 반환할 수 있지만, “AI 답변”이라고 오해하지 않도록 상태를 명시한다.
+`QuestionHistory`는 기존 단일 질문 기록과 호환되는 chat turn이다. 기존 row는 migration에서 개별 conversation의 첫 turn으로 backfill한다. 이전 turn은 답변 맥락일 뿐 citation 근거가 아니며, 매 turn의 `S1..S3`만 답변 citation으로 허용한다. API는 질문 row를 먼저 `queued`로 저장하고 오래 걸리는 경우 `202 + GET polling`을 사용한다.
+
+질문에 외부 AI가 연결되지 않아도 원문/DB와 검색된 근거 snapshot은 보존한다. configured false이면 질문 상태를 `failed`, 오류를 `AI_NOT_CONFIGURED`로 기록하고 생성 답변은 반환하지 않는다. Responses 호출 또는 citation 검증 실패도 같은 방식으로 근거 카드는 보존하되 가짜 답변을 노출하지 않는다.
 
 ## 9. Graph query
 
@@ -368,7 +386,7 @@ global exception handler는:
 - 429: retry-after가 있으면 job backoff에 반영.
 - timeout: 제한 횟수 내 exponential backoff.
 - 4xx validation: 자동 retry 금지, job failed.
-- Vector Store indexing 지연: `vector_store_ready`에서 poll하며 UI에 진행 표시.
+- Vector Store indexing 지연: SDK poll helper로 대기하되, timeout/실패는 document vector status에만 기록하고 로컬 준비 상태는 유지.
 - Responses output schema 오류: 동일 입력 1회 retry, 이후 failed.
 
 ## 11. Observability
@@ -431,13 +449,20 @@ OpenAPI generated by FastAPI is checked against frontend `api` types for:
 
 ## 13. Current implementation migration checklist
 
-현재 구현과 목표 architecture의 차이를 명시한다.
+2026-07-30 역검증 결과:
 
-- [ ] `Document.content` 원문을 local asset으로 이동.
-- [ ] `keywords_json`, `embedding_json` 의존 제거 및 normalized tables/Vector Store gateway 전환.
-- [ ] document-only graph를 document/chunk/concept graph로 확장.
-- [ ] `/knowledge/*` compatibility route를 `/documents`, `/questions`, `/graph` resource API로 전환.
-- [ ] route에서 OpenAI SDK 직접 호출을 `integrations/openai`로 이동.
-- [ ] 분석 단일 request를 durable job + SSE로 전환.
-- [ ] 표준 response/error envelope 적용.
-- [ ] 기존 Frontend의 별도 검색 form을 제거하고 `AI에게 질문` single entry로 통합.
+- [x] 원문 local asset 저장과 normalized chunk/concept/relation 테이블 사용.
+- [x] Vector Store gateway와 Responses Structured Outputs를 integration 경계로 분리.
+- [x] document/chunk/concept graph snapshot API 구현.
+- [x] `/documents`, `/questions`, `/graph` resource API와 표준 envelope 구현.
+- [x] 분석 job DB 상태와 SSE progress stream 구현.
+- [x] `AI에게 질문` 단일 entry와 최대 3개 local evidence mapping 구현.
+- [x] conversation/turn 저장, 최근 context window, standalone retrieval query를 구현한다.
+- [x] turn별 source snapshot을 유지하는 멀티턴 API와 대화 목록/상세를 구현한다.
+- [x] 질문 처리를 `202 + GET polling` 상태 계약으로 통일한다.
+- [x] SSE heartbeat, event ID, terminal event와 frontend polling fallback을 구현.
+- [x] 요청 ID 전파, validation 입력값 비노출, 원문·질문 응답 `no-store`를 구현.
+- [x] pytest가 운영 DB를 건드리지 않도록 임시 DB·storage와 Alembic head fixture를 구현.
+- [ ] route 내부 SQLModel query를 repository 계층으로 점진적으로 이동한다. (P1 유지보수)
+- [ ] `BackgroundTasks`를 별도 durable worker로 교체해 프로세스 종료 후 자동 재시도를 지원한다. (P4)
+- [ ] 질문 비동기 처리가 필요한 문서 규모에서 queue/worker 경계를 추가한다. (P4 이후)

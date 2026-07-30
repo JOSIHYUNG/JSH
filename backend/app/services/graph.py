@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from collections import Counter
 
 from sqlmodel import Session, select
 
@@ -35,16 +36,19 @@ class GraphService:
             for chunk in chunks:
                 nodes.append(GraphNode(id=f"chunk:{chunk.id}", entity_type="chunk", entity_id=chunk.id or 0, label=f"청크 {chunk.chunk_index + 1}", subtype=None, size=3, color_token="chunk", metadata={"document_id": chunk.document_id, "start_char": chunk.start_char, "end_char": chunk.end_char}))
         if "concept" in requested:
-            degree = {concept.id: sum(association.concept_id == concept.id for association in associations) for concept in concepts}
+            degree = Counter(association.concept_id for association in associations)
             for concept in concepts:
                 nodes.append(GraphNode(id=f"concept:{concept.id}", entity_type="concept", entity_id=concept.id or 0, label=concept.canonical_name, subtype=concept.concept_type, size=min(12, 4 + degree.get(concept.id, 0)), color_token=concept.concept_type, metadata={"description": concept.description, "connection_count": degree.get(concept.id, 0)}))
         node_ids = {node.id for node in nodes}
+        chunk_document = {chunk.id: chunk.document_id for chunk in chunks}
         edges: list[GraphEdge] = []
         for chunk in chunks:
             if include_chunks and f"document:{chunk.document_id}" in node_ids and f"chunk:{chunk.id}" in node_ids:
                 edges.append(GraphEdge(id=f"contains:{chunk.document_id}:{chunk.id}", source=f"document:{chunk.document_id}", target=f"chunk:{chunk.id}", edge_type="contains", relation_type=None, strength=1.0, is_directed=True, evidence_chunk_id=chunk.id))
         for association in associations:
-            source = f"chunk:{association.chunk_id}" if include_chunks else f"document:{next((chunk.document_id for chunk in chunks if chunk.id == association.chunk_id), 0)}"
+            if association.extraction_confidence < min_strength:
+                continue
+            source = f"chunk:{association.chunk_id}" if include_chunks else f"document:{chunk_document.get(association.chunk_id, 0)}"
             target = f"concept:{association.concept_id}"
             if source in node_ids and target in node_ids:
                 edges.append(GraphEdge(id=f"mentions:{association.chunk_id}:{association.concept_id}:{association.mention}", source=source, target=target, edge_type="mentions", relation_type=None, strength=association.extraction_confidence, is_directed=False, evidence_chunk_id=association.chunk_id))

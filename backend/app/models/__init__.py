@@ -1,6 +1,7 @@
 from app.models.knowledge import (
     AnalysisJob,
     AppSetting,
+    ChatConversation,
     ChunkConcept,
     Concept,
     ConceptAlias,
@@ -15,6 +16,7 @@ from app.models.knowledge import (
 __all__ = [
     "AnalysisJob",
     "AppSetting",
+    "ChatConversation",
     "ChunkConcept",
     "Concept",
     "ConceptAlias",
