@@ -147,6 +147,14 @@ export type QuestionSource = {
 
 export type QuestionStatus = 'queued' | 'retrieving' | 'generating' | 'completed' | 'no_evidence' | 'failed'
 
+export type QuestionWebSource = {
+  citation_key: string
+  url: string
+  title: string
+  publisher: string | null
+  rank: number
+}
+
 export type QuestionResult = {
   id: number
   conversation_id: number | null
@@ -157,6 +165,7 @@ export type QuestionResult = {
   answer_mode: 'grounded' | 'general'
   answer_language: string | null
   sources: QuestionSource[]
+  web_sources: QuestionWebSource[]
   related_concepts: ConceptSummary[]
   retrieval: {
     provider: 'vector_store' | 'lexical_fallback' | 'none'

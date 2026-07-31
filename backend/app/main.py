@@ -11,7 +11,7 @@ from app.core.envelope import request_id_context
 from app.core.errors import DomainError
 from app.core.http import domain_error_handler, unexpected_error_handler, validation_error_handler
 from app.db import init_database
-from app.services.jobs import recover_interrupted_jobs, recover_interrupted_questions
+from app.services.jobs import recover_interrupted_agent_runs, recover_interrupted_jobs, recover_interrupted_questions
 
 
 settings = get_settings()
@@ -22,6 +22,7 @@ async def lifespan(_app: FastAPI):
     init_database()
     recover_interrupted_jobs()
     recover_interrupted_questions()
+    recover_interrupted_agent_runs()
     yield
 
 
@@ -49,7 +50,7 @@ async def request_context(request: Request, call_next):
         response.headers["X-Request-ID"] = request_id
         if request.url.path.startswith(f"{settings.api_v1_prefix}/documents/") and request.url.path.endswith("/original"):
             response.headers["Cache-Control"] = "no-store"
-        elif request.url.path.startswith(f"{settings.api_v1_prefix}/questions"):
+        elif request.url.path.startswith(f"{settings.api_v1_prefix}/questions") or request.url.path.startswith(f"{settings.api_v1_prefix}/agent/"):
             response.headers["Cache-Control"] = "no-store"
         return response
     finally:

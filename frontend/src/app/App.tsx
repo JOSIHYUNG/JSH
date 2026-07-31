@@ -11,6 +11,7 @@ import { ChatPanel } from '../features/questions/ChatPanel'
 import { QuestionHistoryPanel } from '../features/questions/QuestionHistoryPanel'
 import { LoadingState } from '../features/feedback/LoadingState'
 import { useKnowledgeController } from '../hooks/useKnowledgeController'
+import { useAgentRunEvents } from '../hooks/useAgentRunEvents'
 import type { GraphNode, QuestionSource } from '../domain/knowledge'
 import { Icon } from '../components/primitives/Icon'
 import { Badge } from '../components/primitives/Badge'
@@ -19,12 +20,14 @@ const KnowledgeGraph = lazy(() => import('../features/graph/KnowledgeGraph').the
 
 function App() {
   const controller = useKnowledgeController()
+  const agentActivity = useAgentRunEvents(controller.agentRun?.id ?? null)
   const { historyOpen, panel, setHistoryOpen, setPanel } = controller
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [questionDraft, setQuestionDraft] = useState('')
   const [focusEntity, setFocusEntity] = useState<{ entity_type: GraphNode['entity_type']; entity_id: number } | null>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
-  const overlayOpen = addModalOpen || historyOpen || panel !== null
+  const overlayOpen = addModalOpen || historyOpen || panel !== null || (controller.questionLoading && !!controller.agentRun)
+  const questionPanelResult = panel?.kind === 'question' ? panel.data : null
 
   useEffect(() => {
     // The main screen does not restore panels from URL state. Remove legacy
@@ -134,7 +137,7 @@ function App() {
       {controller.panel && controller.panel.kind === 'loading' && <div className="side-panel-layer"><div className="panel-scrim" onClick={closePanel} /><aside className="context-panel loading-panel" role="dialog" aria-modal="true" aria-label={controller.panel.label} tabIndex={-1}><LoadingState label={controller.panel.label} /></aside></div>}
       {controller.panel?.kind === 'document' && <div className="side-panel-layer"><div className="panel-scrim" onClick={closePanel} /><DocumentPanel document={controller.panel.data} onClose={closePanel} onOpenConcept={controller.openConcept} onAskConcept={submitQuestion} onDelete={controller.deleteDocument} onReanalyze={controller.reanalyzeDocument} onUpdate={controller.updateDocument} onOpenFullDocument={(id) => void controller.openDocument(id)} /></div>}
       {controller.panel?.kind === 'concept' && <div className="side-panel-layer"><div className="panel-scrim" onClick={closePanel} /><ConceptPanel concept={controller.panel.data} onClose={closePanel} onOpenDocument={controller.openDocument} onOpenConcept={controller.openConcept} onAsk={submitQuestion} onCenter={() => setFocusEntity({ entity_type: 'concept', entity_id: controller.panel?.kind === 'concept' ? controller.panel.data.id : 0 })} /></div>}
-      {controller.panel?.kind === 'question' && <div className="side-panel-layer"><div className="panel-scrim" onClick={closePanel} /><ChatPanel conversation={controller.activeConversation} latestResult={controller.panel.data} onBackToHistory={backToHistory} onOpenSource={openSource} onOpenGeneratedDocument={(id) => void controller.openDocument(id)} onAskConcept={submitQuestion} onAsk={submitQuestion} loading={controller.questionLoading} onRetry={(id) => void controller.rerunTurn(id)} onEdit={editQuestion} onNewConversation={() => { controller.startNewConversation(); setQuestionDraft('') }} onRename={(id, title) => void controller.renameConversation(id, title)} onDelete={(id) => void controller.deleteConversation(id)} /></div>}
+      {(controller.panel?.kind === 'question' || (controller.questionLoading && controller.agentRun)) && <div className="side-panel-layer"><div className="panel-scrim" onClick={closePanel} /><ChatPanel conversation={controller.activeConversation} latestResult={questionPanelResult} onBackToHistory={backToHistory} onOpenSource={openSource} onOpenGeneratedDocument={(id) => void controller.openDocument(id)} onAskConcept={submitQuestion} onAsk={submitQuestion} loading={controller.questionLoading} onRetry={(id) => void controller.rerunTurn(id)} onEdit={editQuestion} onNewConversation={() => { controller.startNewConversation(); setQuestionDraft('') }} onRename={(id, title) => void controller.renameConversation(id, title)} onDelete={(id) => void controller.deleteConversation(id)} agentRun={agentActivity.run ?? controller.agentRun} agentActivities={agentActivity.events} onCancelAgent={() => void controller.cancelAgentRun()} agentWebSources={controller.agentWebSources} agentQuestion={controller.agentQuestion} /></div>}
       {controller.historyOpen && <div className="side-panel-layer"><div className="panel-scrim" onClick={() => controller.setHistoryOpen(false)} /><QuestionHistoryPanel conversations={controller.conversations} onClose={() => controller.setHistoryOpen(false)} onOpen={(id) => void controller.openConversation(id)} onRename={(id, title) => void controller.renameConversation(id, title)} onDelete={(id) => void controller.deleteConversation(id)} /></div>}
       <AddDocumentModal open={addModalOpen} loading={controller.addLoading} progress={controller.addProgress} error={controller.addError} cancelAvailable={controller.addDocumentId !== null} onClose={() => setAddModalOpen(false)} onSubmit={submitDocument} onCancelAnalysis={() => void controller.cancelAddAnalysis()} onViewDocument={viewAddedDocument} />
     </AppShell>

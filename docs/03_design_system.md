@@ -1,10 +1,22 @@
 # 03. Design System
 
 - 문서 상태: Reviewed / token baseline
-- 시각 방향의 canonical spec: `docs/design.md`
+- 시각 방향과 컴포넌트 계약의 canonical spec: 이 문서
 - 기준 문서: `docs/PRD.md`
 - 대상: 개인용 지식 탐색 서비스, desktop-first
 - 핵심 언어: 밝고 깊이감 있는 지식 우주·기술적·조용한 집중·근거가 보이는 탐색
+
+## 디자인 방향: Celestial Editorial
+
+`Celestial Editorial`은 우주 공간의 깊이감과 편집형 문서 읽기의 명료함을 결합한다. 그래프는 넓은 canvas로 두고, 통계·최근 자료·상태는 작은 bento 카드로 분리한다. 화면의 장식보다 `지식 구조 → AI에게 질문 → 근거 → 원문` 흐름을 우선한다.
+
+- 배경: 짙은 캔버스와 절제된 별·glow. light theme에서는 밝은 캔버스와 낮은 대비의 grid로 전환한다.
+- 계층: 그래프는 탐색의 중심, 질문·답변·근거는 행동의 중심, 원문은 검증의 중심이다.
+- 타이포그래피: 본문·입력·버튼·상태는 sans-serif, hero와 주요 패널 제목만 `Newsreader` 계열 display serif를 사용한다.
+- 색상 역할: teal은 AI/주요 action, amber는 문서·근거, violet은 AI 답변·관계를 나타낸다. danger는 실패·삭제 확인에만 사용한다.
+- 표면: 모든 카드에 blur/glass를 적용하지 않는다. 중요한 panel에만 surface와 1px border를 사용하고 shadow보다 명도 차이와 subtle glow를 우선한다.
+- 접근성: 색만으로 상태·개념 유형·출처 순위를 표현하지 않고 label, icon, text, line style을 함께 사용한다.
+- 동작: 상태 이해에 기여하는 짧은 transition만 사용하고, `prefers-reduced-motion`에서는 particle·glow pulse·panel slide를 제거한다.
 
 ## 1. 디자인 목표
 
@@ -127,7 +139,7 @@ Graph node rules:
 
 ### 3.3 Typography
 
-기본 system sans를 사용하고 긴 원문에는 읽기 좋은 line-height를 적용한다. 제품명/eyebrow만 display treatment를 허용한다.
+기본 sans-serif를 사용하고 긴 원문에는 읽기 좋은 line-height를 적용한다. hero와 주요 패널 제목에는 `Newsreader`, `Iowan Old Style`, `Georgia` 순서의 display serif를 제한적으로 사용한다.
 
 | token | size | weight | line-height | 용도 |
 |---|---:|---:|---:|---|
@@ -136,8 +148,8 @@ Graph node rules:
 | `text-md` | 1rem | 400 | 1.6 | 원문/답변 |
 | `text-lg` | 1.125rem | 600 | 1.4 | card heading |
 | `text-xl` | 1.25rem | 700 | 1.3 | panel title |
-| `display-sm` | 2rem | 700 | 1.1 | home hero |
-| `display-lg` | 3rem | 700 | 1.0 | desktop hero 제한 |
+| `display-sm` | `clamp(2.45rem, 4vw, 4.3rem)` | 650 | 1.02 | home hero |
+| `display-md` | `clamp(2rem, 4vw, 3.5rem)` | 650 | 1.0 | 결과·상세 강조 |
 
 - 본문·원문·질문·답변은 `text-sm` 미만을 사용하지 않는다.
 - 원문은 65~78자 정도의 읽기 폭, line-height 1.7, paragraph gap 1rem.
@@ -155,9 +167,9 @@ Graph node rules:
 | `space-6` | 24px |
 | `space-8` | 32px |
 | `space-10` | 40px |
-| `radius-sm` | 6px |
-| `radius-md` | 10px |
-| `radius-lg` | 16px |
+| `radius-sm` | 8px |
+| `radius-md` | 12px |
+| `radius-lg` | 22px |
 | `radius-pill` | 999px |
 
 - 카드 내부 기본 padding 20~24px.
@@ -313,6 +325,18 @@ Toast는 성공·일반 오류의 짧은 안내에만 사용한다. 분석 단�
 - panel은 bottom sheet/full screen.
 - hover에 의존하는 정보는 tap 또는 node list로 대체한다.
 
+### 화면 구성 순서
+
+홈의 기본 정보 순서는 `brand → hero → AI question → stats → graph → recent/signal → footer`다. 질문 결과는 drawer/panel로 열어 입력 영역과 원문 탐색을 단절시키지 않는다.
+
+- Home / Knowledge Space: 가치 제안과 통계는 짧게, 그래프와 자료 추가 action은 즉시 노출한다.
+- Question Command Surface: `AI에게 질문` 단일 입력을 사용하고, loading·Agent activity·답변·출처 순서로 표시한다.
+- Graph Surface: document는 amber rounded rectangle, concept는 유형별 원형, chunk는 낮은 opacity의 작은 노드로 표시한다. 선택 시 outer ring과 연결 edge를 강조한다.
+- Context Drawer: document·concept·question detail을 공통 header, close, graph focus action으로 구성한다. source click은 document detail과 chunk highlight로 이어진다.
+- Add Document Modal: `idle → validating → processing → completed | failed | canceled` 상태를 하나의 모달에서 이어서 보여준다. progress는 실제 backend job stage를 반영한다.
+
+Desktop content max width는 현재 구현과 맞춰 1440px로 고정한다. 1200px 이상에서 graph는 main 영역 60~70%, context panel은 360~520px로 구성하고, 768px 미만에서는 panel을 full-screen sheet로 전환한다.
+
 ## 6. Motion
 
 - 기본 motion duration 160~240ms.
@@ -341,6 +365,14 @@ Toast는 성공·일반 오류의 짧은 안내에만 사용한다. 분석 단�
 - 삭제: `이 자료는 그래프와 새로운 AI 답변에서 즉시 제외됩니다.`
 - 길이·제한 오류는 사용자가 수정할 수 있는 방법을 함께 말한다.
 
+## 8.1 구현 규칙
+
+- semantic 색상과 surface는 `frontend/src/styles/tokens.css`의 CSS variable을 우선 사용한다. feature CSS에서 새로운 raw hex를 직접 추가하지 않는다.
+- primitive는 시각 variant를 책임지고 feature component는 도메인 상태와 사용자 동작을 책임진다.
+- CSS class는 `graph-section`, `context-panel`처럼 의미 있는 영역명을 사용한다.
+- screenshot 전용 데이터·fake preview·demo text를 production component에 추가하지 않는다.
+- WebGL canvas의 시각 효과보다 DOM 기반 filter와 접근 가능한 graph node list를 우선한다.
+
 ## 9. Visual QA 기준
 
 - 1440×900, 1280×800, 768×1024, 390×844에서 overflow 없음.
@@ -350,7 +382,37 @@ Toast는 성공·일반 오류의 짧은 안내에만 사용한다. 분석 단�
 - processing/failed/no evidence/stale/empty 상태는 production mock 없이 격리된 test fixture 또는 component harness에서 재현 가능해야 한다.
 - 고밀도 graph에서 node를 찾기 위한 filter와 focus action이 항상 노출된다.
 
-## 10. Component acceptance checklist
+## 9.1 테마 시스템
+
+- 초기 테마는 사용자가 저장한 값이 없을 때 `prefers-color-scheme`를 사용하고, 선택값은 `localStorage[jsh-theme]`에 저장한다.
+- `html[data-theme]`와 `color-scheme`을 함께 갱신해 native input/select와 scrollbar도 같은 테마를 사용한다.
+- dark theme은 `#0D1726` 계열 canvas와 teal glow를 사용하고, light theme은 `#F3F7FB` 계열 canvas와 낮은 강도의 border를 사용한다. 구체적인 색상은 3.1 token 표를 정본으로 한다.
+- theme 전환은 reload 없이 적용한다. graph background, node/link palette, panel surface가 함께 갱신되어야 한다.
+- light theme의 teal·amber·violet text는 WCAG AA 대비를 만족하는 어두운 variant를 사용한다.
+
+## 9.2 릴리스 적용 순서
+
+1. P0: tokens, typography, home hierarchy, graph surface, question surface, drawer baseline.
+2. P1: 실제 분석 progress, source range highlight, reanalyze/delete, error/empty states.
+3. P2: graph focus, 고급 filter, 질문 history, source snapshot states.
+4. P3: concept/relation 편집, URL state 복원, 작업 취소·undo.
+5. P4: focus trap·브라우저 접근성 회귀, 대형 graph 성능 개선, visual regression 자동화.
+6. P5: export/import, collections, saved views, personalization.
+
+디자인 레퍼런스는 [Material 3](https://m3.material.io/), [Apple Materials HIG](https://developer.apple.com/design/human-interface-guidelines/materials), [Apple Foundations HIG](https://developer.apple.com/design/human-interface-guidelines/foundations)을 참고한다. 레퍼런스의 시각 요소를 그대로 복제하지 않고 JSH의 graph·근거·원문 탐색 흐름에 맞춰 적용한다.
+
+## 10. Agent Activity 컴포넌트 추가
+
+- AgentActivityTimeline: 답변 위 collapsible 영역, sequence 순서, 최근 3~5개 기본 노출
+- AgentActivityItem: tool별 고정 label, 진행/완료/실패 badge, sanitized query·node label
+- AgentRunStatus: queued/running/completed/canceled/failed/max_turns 상태와 action
+- WebSourceCard: W#, title, publisher, HTTPS link. local S# SourceCard와 시각적으로 구분
+
+활동 정보는 보조 정보로 두고 답변과 근거를 시각적 우선순위로 유지한다. raw prompt, reasoning, 전체 tool 결과는 표시하지 않는다. 진행 영역은 aria-live=polite, reduced motion을 따른다.
+
+Agent live phase: 실행 중 `질문을 생각하고 있습니다`, `저장된 자료를 찾고 있습니다`, `연결된 개념을 탐색하고 있습니다`, `최신 웹 자료를 검색하고 있습니다`, `답변을 작성하고 있습니다` 중 현재 단계를 큰 상태 행으로 표시한다. 완료·실패·취소 시 terminal 상태로 전환한다.
+
+## 11. Component acceptance checklist
 
 - [x] 모든 primary action이 `AI에게 질문` 단일 흐름과 일치한다.
 - [x] document/chunk/concept 상태와 디자인 token mapping이 API enum과 일치한다.

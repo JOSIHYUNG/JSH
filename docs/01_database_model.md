@@ -475,13 +475,33 @@ DB 모델과 API response 모델은 분리한다. 다음 read model을 repositor
 | `ConversationDetail` | conversation summary + ordered question turns |
 | `QuestionHistorySummary` | id, conversation id, turn index, question preview, status, answer preview, evidence count, created_at |
 
-## 8. Alembic migration 정책
+## 8. Agent 실행 저장 모델 추가
+
+기존 conversation/question/source 모델은 유지하고 Agent 실행 단위만 추가한다.
+
+### 8.1 agent_runs
+
+question_history_id와 1:1인 실행 aggregate다. status는 queued/running/completed/failed/canceled/max_turns, stage는 reasoning/tool_requested/tool_running/finalizing으로 제한한다. current_turn은 0~30, max_turns는 생성 시 30을 snapshot한다. model name, prompt version, tool call count, stop reason, stable error, started/completed timestamps를 저장한다.
+
+### 8.2 agent_events
+
+run별 sequence를 갖는 순서형 event log다. run_started, model_started, tool_requested, tool_started, tool_completed, tool_failed, run_completed, run_failed, run_canceled, run_max_turns를 지원한다. UI 전달용 safe label과 제한된 JSON만 저장하고 원문·reasoning·API key는 저장하지 않는다. (run_id, sequence) unique index를 둔다.
+
+### 8.3 question_web_sources
+
+질문별 web citation snapshot이다. W1.. key, URL, title, publisher, rank를 저장하며 question_sources의 local S1..S3와 분리한다. conversation/question 삭제 시 cascade하고 URL은 검증된 HTTPS만 저장한다.
+
+### 8.4 context·복구 규칙
+
+다음 모델 호출에는 최근 완료 turn 최대 3개와 각각의 답변만 포함한다. 요약 row는 만들지 않는다. queued/running Agent는 startup recovery에서 중복 실행하지 않고 SERVICE_RESTARTED terminal 상태로 정리한다.
+
+## 9. Alembic migration 정책
 
 - 모든 schema 변경은 `backend/alembic/versions/`의 단일 revision으로 만든다.
 - 모델 변경 후 migration 생성 → 빈 DB upgrade → 기존 DB upgrade → downgrade 가능성 검토 순서로 검증한다.
 - FTS5 virtual table·trigger는 일반 SQLModel metadata만으로 안전하게 생성하지 말고 migration의 explicit SQL로 관리한다.
 - 데이터 변환이 필요한 migration은 schema migration과 분리한다.
-- 현재 head는 `20260730_0005`다. 과거 `documents.content`, `keywords_json`, `embedding_json`에서 목표 모델로 이동할 때는 다음 순서를 따른다.
+- Agent 전환 후 현재 head는 `20260731_0010_agent_schema_indexes`다. 과거 `documents.content`, `keywords_json`, `embedding_json`에서 목표 모델로 이동할 때는 다음 순서를 따른다.
   1. 신규 컬럼/테이블 생성.
   2. 기존 원문을 `storage/`로 이동하고 hash/metadata 입력.
   3. 기존 내용으로 chunks/FTS 생성.

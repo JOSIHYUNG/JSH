@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_vector_store_id: str | None = None
     openai_chat_model: str = "gpt-5.6-terra"
+    openai_agent_model: str | None = None
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: float = 60
     max_upload_bytes: int = 20_000_000
@@ -32,6 +33,19 @@ class Settings(BaseSettings):
     chat_evidence_max_chars: int = 6_000
     chat_rewrite_max_output_tokens: int = 128
     chat_answer_max_output_tokens: int = 768
+    agent_max_turns: int = 30
+    agent_context_turn_limit: int = 3
+    agent_tool_timeout_seconds: float = 45
+    agent_run_timeout_seconds: float = 300
+    agent_tool_output_max_chars: int = 24_000
+    agent_explore_node_limit: int = 8
+    agent_explore_excerpt_limit: int = 12
+    agent_web_search_context_size: str = "low"
+    agent_max_output_tokens: int = 1536
+
+    @property
+    def effective_agent_model(self) -> str:
+        return self.openai_agent_model or self.openai_chat_model
 
     model_config = SettingsConfigDict(
         env_file=".env",

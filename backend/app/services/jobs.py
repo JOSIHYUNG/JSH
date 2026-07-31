@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from app.db import engine
-from app.models import AnalysisJob, Document, DocumentChunk, QuestionHistory
+from app.models import AgentRun, AnalysisJob, Document, DocumentChunk, QuestionHistory
 
 
 def now() -> datetime:
@@ -91,6 +91,32 @@ def recover_interrupted_questions() -> int:
             history.error_message = "서버가 다시 시작되어 질문 처리가 중단되었습니다. 다시 시도해 주세요."
             history.completed_at = now()
             session.add(history)
+            recovered += 1
+        session.commit()
+    return recovered
+
+
+def recover_interrupted_agent_runs() -> int:
+    """Close process-local Agent runs so a restart never leaves a false running state."""
+    recovered = 0
+    with Session(engine) as session:
+        rows = session.exec(select(AgentRun).where(AgentRun.status.in_(["queued", "running"]))).all()
+        for run in rows:
+            run.status = "failed"
+            run.stage = "failed"
+            run.stop_reason = "service_restarted"
+            run.last_error_code = "SERVICE_RESTARTED"
+            run.last_error_message = "서버가 재시작되어 Agent 실행이 중단되었습니다. 다시 시도해 주세요."
+            run.completed_at = now()
+            run.updated_at = now()
+            history = session.get(QuestionHistory, run.question_history_id)
+            if history and history.status in {"queued", "retrieving", "generating"}:
+                history.status = "failed"
+                history.error_code = "SERVICE_RESTARTED"
+                history.error_message = run.last_error_message
+                history.completed_at = now()
+                session.add(history)
+            session.add(run)
             recovered += 1
         session.commit()
     return recovered

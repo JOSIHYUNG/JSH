@@ -6,8 +6,14 @@ from app.db import engine
 from app.models import AppSetting
 from sqlmodel import Session
 from app.services.analysis import AnalysisWorkflow
+from app.agent.orchestrator import AgentOrchestrator
+from app.agent.tools.base import ToolRegistry
+from app.agent.tools.explore_node import make_explore_tool
+from app.agent.tools.search_knowledge import make_search_tool
+from app.services.agent_runs import AgentRunService
 from app.services.documents import DocumentService
 from app.services.graph import GraphService
+from app.services.node_exploration import NodeExplorationService
 from app.services.questions import QuestionService
 from app.services.retrieval import RetrievalService
 
@@ -39,3 +45,14 @@ def question_service() -> QuestionService:
 
 def graph_service() -> GraphService:
     return GraphService()
+
+
+def agent_run_service() -> AgentRunService:
+    retrieval = RetrievalService(vector_store())
+    explorer = NodeExplorationService(
+        max_nodes=get_settings().agent_explore_node_limit,
+        max_excerpts_per_node=get_settings().agent_explore_excerpt_limit,
+        max_output_chars=get_settings().agent_tool_output_max_chars,
+    )
+    registry = ToolRegistry([make_search_tool(retrieval), make_explore_tool(explorer)])
+    return AgentRunService(question_service(), AgentOrchestrator(registry))

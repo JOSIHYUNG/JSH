@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { AnalysisJob, ConceptDetail, ConversationDetail, ConversationSummary, DocumentDetail, DocumentSummary, GraphFilters, GraphSnapshot, QuestionHistorySummary, QuestionResult, SystemStatus } from '../domain/knowledge'
+import type { AgentRunPayload, AgentRunSummary, AgentWebSource } from '../domain/agent'
+import { agentApi } from '../api/agent'
 import { knowledgeApi } from '../api/knowledge'
 
 export type PanelState =
@@ -30,6 +32,15 @@ async function waitForQuestion(id: number): Promise<QuestionResult> {
     await wait(500)
   }
   throw new Error('질문 처리 시간이 초과되었습니다.')
+}
+
+async function waitForAgentRun(id: number): Promise<AgentRunPayload> {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const payload = await agentApi.getRun(id)
+    if (['completed', 'no_evidence', 'failed', 'canceled', 'max_turns'].includes(payload.run.status) || payload.result?.status === 'no_evidence' || payload.result?.status === 'failed') return payload
+    await wait(500)
+  }
+  throw new Error('Agent 실행 시간이 초과되었습니다.')
 }
 
 export type AnalysisProgress = Pick<AnalysisJob, 'stage' | 'progress' | 'message'>
@@ -104,6 +115,9 @@ export function useKnowledgeController() {
   const [notice, setNotice] = useState<string | null>(null)
   const [initialLoading, setInitialLoading] = useState(true)
   const [questionLoading, setQuestionLoading] = useState(false)
+  const [agentRun, setAgentRun] = useState<AgentRunSummary | null>(null)
+  const [agentWebSources, setAgentWebSources] = useState<AgentWebSource[]>([])
+  const [agentQuestion, setAgentQuestion] = useState<string | null>(null)
   const [conversationLoading, setConversationLoading] = useState(false)
   const [turnLoading, setTurnLoading] = useState(false)
   const [documentLoading, setDocumentLoading] = useState(false)
@@ -204,12 +218,18 @@ export function useKnowledgeController() {
   const ask = useCallback(async (question: string) => {
     setQuestionLoading(true)
     setTurnLoading(true)
+    setAgentQuestion(question)
     setNotice(null)
     try {
-      const queued = await knowledgeApi.ask(question, activeConversationId)
+      const queued = await agentApi.createRun(question, activeConversationId)
+      setAgentRun(queued)
       const conversationId = queued.conversation_id
       if (conversationId) setActiveConversationId(conversationId)
-      const result = await waitForQuestion(queued.id)
+      const payload = await waitForAgentRun(queued.id)
+      setAgentRun(payload.run)
+      setAgentWebSources(payload.web_sources)
+      const result = payload.result
+      if (!result) throw new Error(payload.run.error?.message ?? 'Agent 응답을 받지 못했습니다.')
       setPanel({ kind: 'question', data: result })
       await refresh()
       const resolvedConversationId = result.conversation_id ?? conversationId
@@ -238,6 +258,9 @@ export function useKnowledgeController() {
     setNotice(null)
     try {
       const detail = await knowledgeApi.getConversation(id)
+      setAgentRun(null)
+      setAgentWebSources([])
+      setAgentQuestion(null)
       setActiveConversationId(id)
       setActiveConversation(detail)
       const latest = detail.turns[detail.turns.length - 1]
@@ -265,6 +288,9 @@ export function useKnowledgeController() {
     setActiveConversationId(null)
     setActiveConversation(null)
     setPanel(null)
+    setAgentRun(null)
+    setAgentWebSources([])
+    setAgentQuestion(null)
     setNotice(null)
   }, [])
 
@@ -314,6 +340,16 @@ export function useKnowledgeController() {
       setTurnLoading(false)
     }
   }, [refresh])
+
+  const cancelAgentRun = useCallback(async () => {
+    if (!agentRun || ['completed', 'failed', 'canceled', 'max_turns'].includes(agentRun.status)) return
+    try {
+      const canceled = await agentApi.cancelRun(agentRun.id)
+      setAgentRun(canceled)
+    } catch (error: unknown) {
+      setNotice(error instanceof Error ? error.message : 'Agent 실행을 중단하지 못했습니다.')
+    }
+  }, [agentRun])
 
   const openHistoryQuestion = useCallback(async (id: number) => {
     setPanel({ kind: 'loading', label: '질문 기록을 복원하는 중' })
@@ -392,6 +428,9 @@ export function useKnowledgeController() {
     notice,
     initialLoading,
     questionLoading,
+    agentRun,
+    agentWebSources,
+    agentQuestion,
     conversationLoading,
     turnLoading,
     documentLoading,
@@ -415,6 +454,7 @@ export function useKnowledgeController() {
     renameConversation,
     deleteConversation,
     rerunTurn,
+    cancelAgentRun,
     openHistoryQuestion,
     rerunQuestion,
     deleteQuestion,

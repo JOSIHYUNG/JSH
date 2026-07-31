@@ -20,7 +20,7 @@ class ConversationContext:
 
 
 class ConversationContextService:
-    def build(self, session: Session, conversation_id: int | None, *, exclude_history_id: int | None = None) -> ConversationContext:
+    def build(self, session: Session, conversation_id: int | None, *, exclude_history_id: int | None = None, max_turns: int | None = None) -> ConversationContext:
         if conversation_id is None:
             return ConversationContext([], False)
         rows = session.exec(
@@ -34,11 +34,12 @@ class ConversationContextService:
             .order_by(QuestionHistory.turn_index.desc())
         ).all()
         settings = get_settings()
+        turn_limit = max_turns or settings.chat_context_turn_limit
         selected: list[ConversationTurnContext] = []
         used_chars = 0
         truncated = False
         for row in rows:
-            if len(selected) >= settings.chat_context_turn_limit:
+            if len(selected) >= turn_limit:
                 truncated = True
                 break
             question = row.question.strip()

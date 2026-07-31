@@ -12,6 +12,7 @@ from app.models.knowledge import (
     QuestionHistory,
     QuestionSource,
 )
+from app.models.agent import AgentEvent, AgentRun, QuestionWebSource
 
 __all__ = [
     "AnalysisJob",
@@ -26,4 +27,7 @@ __all__ = [
     "DocumentKeyword",
     "QuestionHistory",
     "QuestionSource",
+    "AgentEvent",
+    "AgentRun",
+    "QuestionWebSource",
 ]

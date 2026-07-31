@@ -7,13 +7,14 @@ from app.core.errors import conflict, not_found
 from app.core.text import preview
 from app.db import engine
 from app.integrations.openai.responses import OpenAIResponsesGateway
-from app.models import ChatConversation, ChunkConcept, Concept, Document, QuestionHistory, QuestionSource
+from app.models import ChatConversation, ChunkConcept, Concept, Document, QuestionHistory, QuestionSource, QuestionWebSource
 from app.schemas.common import (
     ConversationDetailResponse,
     ConversationSummaryResponse,
     QuestionResultResponse,
     QuestionSourceResponse,
     RetrievalResponse,
+    WebSourceResponse,
 )
 from app.services.conversation_context import ConversationContextService
 from app.services.documents import DocumentService
@@ -324,6 +325,11 @@ class QuestionService:
             top_score=max((source.score for source in sources), default=None),
             used_chunk_ids=[source.chunk_id for source in sources if source.chunk_id is not None],
         )
+        web_sources = session.exec(
+            select(QuestionWebSource)
+            .where(QuestionWebSource.question_history_id == history.id)
+            .order_by(QuestionWebSource.source_rank)
+        ).all()
         error = (
             {
                 "code": history.error_code,
@@ -344,6 +350,16 @@ class QuestionService:
             answer_mode=history.answer_mode,
             answer_language=history.answer_language,
             sources=source_models,
+            web_sources=[
+                WebSourceResponse(
+                    citation_key=source.citation_key,
+                    url=source.url,
+                    title=source.title,
+                    publisher=source.publisher,
+                    rank=source.source_rank,
+                )
+                for source in web_sources
+            ],
             related_concepts=concepts,
             retrieval=retrieval,
             error=error,

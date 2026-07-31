@@ -175,6 +175,14 @@ class QuestionSourceResponse(BaseModel):
     openable: bool
 
 
+class WebSourceResponse(BaseModel):
+    citation_key: str
+    url: str
+    title: str
+    publisher: str | None = None
+    rank: int
+
+
 class RetrievalResponse(BaseModel):
     provider: str
     candidate_count: int
@@ -194,6 +202,7 @@ class QuestionResultResponse(BaseModel):
     answer_mode: str
     answer_language: str | None
     sources: list[QuestionSourceResponse]
+    web_sources: list[WebSourceResponse] = Field(default_factory=list)
     related_concepts: list[ConceptSummary]
     retrieval: RetrievalResponse
     error: dict[str, Any] | None = None

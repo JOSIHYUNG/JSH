@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pypdf import PdfReader
 from sqlmodel import Session, delete, func, select
 
-from app.api.dependencies import analysis_workflow, document_service, graph_service, question_service, storage, vector_store
+from app.api.dependencies import agent_run_service, analysis_workflow, document_service, graph_service, question_service, storage, vector_store
 from app.core.config import get_settings
 from app.core.envelope import ApiResponse, page_meta, success
 from app.core.errors import DomainError, not_found
@@ -21,6 +21,7 @@ from app.integrations.filesystem.storage import LocalFileStorage
 from app.models import AnalysisJob, AppSetting, ChatConversation, ChunkConcept, Concept, ConceptAlias, ConceptRelation, Document, DocumentChunk, DocumentKeyword, QuestionHistory, QuestionSource
 from app.schemas.common import ConversationCreate, ConversationQuestionCreate, ConversationUpdate, ConceptDetailResponse, ConceptRelationResponse, DocumentCreate, DocumentDetailResponse, DocumentUpdate, GraphSnapshot, QuestionCreate, QuestionRerunRequest, ReanalyzeRequest
 from app.services.analysis import AnalysisWorkflow
+from app.services.agent_runs import AgentRunService
 from app.services.documents import DocumentService
 from app.services.graph import GraphService
 from app.services.jobs import now, job_error
@@ -349,17 +350,17 @@ def delete_conversation(conversation_id: int, session: Session = Depends(get_ses
 
 
 @router.post("/conversations/{conversation_id}/questions", status_code=status.HTTP_202_ACCEPTED)
-def ask_conversation_question(conversation_id: int, payload: ConversationQuestionCreate, background: BackgroundTasks, session: Session = Depends(get_session), service: QuestionService = Depends(question_service)) -> ApiResponse:
-    history = service.enqueue(session, payload.question, conversation_id)
-    background.add_task(service.process, history.id)
-    return success(service.to_response(session, history))
+def ask_conversation_question(conversation_id: int, payload: ConversationQuestionCreate, background: BackgroundTasks, session: Session = Depends(get_session), service: AgentRunService = Depends(agent_run_service)) -> ApiResponse:
+    run, history = service.enqueue(session, payload.question, conversation_id)
+    background.add_task(service.orchestrator.run, run.id)
+    return success(service.questions.to_response(session, history))
 
 
 @router.post("/questions", status_code=status.HTTP_202_ACCEPTED)
-def ask_question(payload: QuestionCreate, background: BackgroundTasks, session: Session = Depends(get_session), service: QuestionService = Depends(question_service)) -> ApiResponse:
-    history = service.enqueue(session, payload.question.strip(), payload.conversation_id)
-    background.add_task(service.process, history.id)
-    return success(service.to_response(session, history))
+def ask_question(payload: QuestionCreate, background: BackgroundTasks, session: Session = Depends(get_session), service: AgentRunService = Depends(agent_run_service)) -> ApiResponse:
+    run, history = service.enqueue(session, payload.question.strip(), payload.conversation_id)
+    background.add_task(service.orchestrator.run, run.id)
+    return success(service.questions.to_response(session, history))
 
 
 @router.get("/questions")
@@ -376,12 +377,12 @@ def get_question(question_id: int, session: Session = Depends(get_session), serv
 
 
 @router.post("/questions/{question_id}/rerun", status_code=status.HTTP_202_ACCEPTED)
-def rerun_question(question_id: int, background: BackgroundTasks, payload: QuestionRerunRequest | None = None, session: Session = Depends(get_session), service: QuestionService = Depends(question_service)) -> ApiResponse:
-    original = service.get(session, question_id)
+def rerun_question(question_id: int, background: BackgroundTasks, payload: QuestionRerunRequest | None = None, session: Session = Depends(get_session), service: AgentRunService = Depends(agent_run_service)) -> ApiResponse:
+    original = service.questions.get(session, question_id)
     question = payload.question.strip() if payload and payload.question else original.question
-    history = service.enqueue(session, question, original.conversation_id)
-    background.add_task(service.process, history.id)
-    return success(service.to_response(session, history))
+    run, history = service.enqueue(session, question, original.conversation_id)
+    background.add_task(service.orchestrator.run, run.id)
+    return success(service.questions.to_response(session, history))
 
 
 @router.delete("/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)

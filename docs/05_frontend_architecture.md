@@ -1,7 +1,7 @@
 # 05. Frontend Architecture
 
 - 문서 상태: Reviewed / target architecture with runtime mapping
-- 시각 시스템의 canonical spec: `docs/design.md`
+- 시각 시스템의 canonical spec: `docs/03_design_system.md`
 - 기준 문서: `docs/PRD.md`, `docs/02_api_spec.md`, `docs/03_design_system.md`, `docs/04_backend_architecture.md`
 - runtime: React + TypeScript + Vite
 - 핵심 UX: 지식 그래프를 보면서 `AI에게 질문`하고, 답변 근거에서 원문으로 이동한다.
@@ -454,7 +454,23 @@ URL에 원문·질문 전문을 넣지 않는다. 질문 history ID만 사용한
 - dark/light contrast, graph panel overlap, reduced motion.
 - dense graph, no evidence, processing, stale evidence screenshots.
 
-## 13. Current implementation migration checklist
+## 13. Agent UI 아키텍처 추가
+
+### 13.1 상태·API
+
+agentRun, agentActivities, agentLoading, agentError를 기존 conversation state와 분리한다. api/agent.ts는 run 생성·조회·취소를 담당하고 useAgentRunEvents.ts는 SSE 활동 스트림을 담당한다. SSE가 끊겨도 canonical GET run polling이 최종 상태를 복구한다. context와 tool 선택은 frontend에서 조립하지 않는다.
+
+### 13.2 화면
+
+ChatPanel에는 AgentActivityTimeline을 답변 위에 배치한다. 고정 formatter로 자료 검색 중, 노드 탐색 중: ..., 웹 검색 중: ..., 답변 정리 중을 표시하며 raw tool JSON·reasoning은 표시하지 않는다. MVP에서는 timeline 내부에서 item/status를 함께 렌더링하고, local S#와 web W# source card를 분리하며 max-turn/canceled/failed 상태에 action을 제공한다.
+
+실행 중에는 SSE 이벤트와 GET run polling으로 현재 단계를 즉시 갱신하고, `생각 중`·`자료 검색 중`·`노드 탐색 중`·`웹 검색 중`·`답변 작성 중` 상태 행을 고정 formatter로 표시한다.
+
+### 13.3 접근성·일관성
+
+activity region은 aria-live=polite, reduced motion을 지원한다. sequence 기준으로 event 중복을 제거하고 conversation 전환 시 이전 run event가 현재 panel을 덮지 않도록 run id를 검증한다.
+
+## 14. Current implementation migration checklist
 
 2026-07-30 역검증 결과:
 

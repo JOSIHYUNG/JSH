@@ -1,5 +1,7 @@
 # 멀티턴 AI 챗봇 확장 구현계획
 
+> Agent 전환 시 본 문서의 질문 실행·context·prompt 설계는 `docs/implementation/agent-plan.md`가 대체한다. 이 문서는 기존 멀티턴 데이터·source snapshot 요구사항의 참고 자료로 유지한다.
+
 - 상태: 확정안
 - 대상: 기존 `AI에게 질문` 단일 질문/RAG 기능을 멀티턴 AI 챗봇으로 확장
 - 기준 코드: `backend/`, `frontend/`

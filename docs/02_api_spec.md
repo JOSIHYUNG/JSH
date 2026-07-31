@@ -671,7 +671,25 @@ SSE 규칙:
 - 삭제된 문서가 graph·new question retrieval에 나오지 않고, old question history snapshot은 열린다.
 - 질문 기록 rerun은 기존 기록을 수정하지 않는다.
 
-## 15. Runtime conformance audit (2026-07-30)
+## 15. Agent API 추가 계약
+
+### 15.1 Canonical endpoint
+
+- POST /agent/runs: question, optional conversation_id; 202와 run_id, question_id, conversation_id, turn_index, max_turns=30 반환
+- POST /conversations/{conversation_id}/agent-runs: 지정 conversation 실행
+- GET /agent/runs/{run_id}: run 상태, stage, current turn, tool count, terminal error, 최종 QuestionResult와 local/web sources 반환
+- GET /agent/runs/{run_id}/events: SSE replay/stream. Last-Event-ID, 15초 heartbeat, terminal event 지원
+- POST /agent/runs/{run_id}/cancel: queued/running 실행 취소. terminal 상태에서는 idempotent
+
+### 15.2 Activity event
+
+event에는 sequence, turn, type, tool, label, status, query_preview, node_labels, result_count, error_code, created_at만 노출한다. raw prompt, reasoning, 전체 chunk, tool JSON은 노출하지 않는다.
+
+### 15.3 호환 규칙
+
+기존 POST /questions, POST /conversations/{id}/questions는 Agent run adapter로 동작하며 기존 202/polling DTO를 유지한다. GET /questions/{id}에는 Agent summary와 web sources를 확장한다. local citation은 S1..S3, web citation은 W1..으로 분리한다.
+
+## 16. Runtime conformance audit (2026-07-30)
 
 이 절은 목표 계약과 현재 FastAPI 구현을 역검증한 결과다. 구현되지 않은 목표 필드는 프론트에서 호출하지 않으며, 기능을 추가할 때 목표 계약을 먼저 구현한다.
 

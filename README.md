@@ -89,4 +89,4 @@ npm run lint
 npm run build
 ```
 
-제품 기준은 [`docs/PRD.md`](docs/PRD.md), API 계약은 [`docs/02_api_spec.md`](docs/02_api_spec.md), 디자인 기준은 [`docs/design.md`](docs/design.md)와 [`docs/03_design_system.md`](docs/03_design_system.md)입니다.
+제품 기준은 [`docs/PRD.md`](docs/PRD.md), API 계약은 [`docs/02_api_spec.md`](docs/02_api_spec.md), 디자인 기준은 [`docs/03_design_system.md`](docs/03_design_system.md)입니다.

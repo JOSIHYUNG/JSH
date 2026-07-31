@@ -270,3 +270,13 @@ Provider raw message·stack trace·요청 전문은 사용자 응답에 넣지 �
 - [Rate limits](https://developers.openai.com/api/docs/guides/rate-limits)
 - [Production best practices](https://developers.openai.com/api/docs/guides/production-best-practices)
 - [Deprecations](https://developers.openai.com/api/docs/deprecations)
+
+## 12. 탐색형 Agent 연동 추가 계약
+
+- Responses API의 `tools`에 custom function tool과 hosted `web_search`를 함께 등록한다.
+- custom tool은 strict JSON Schema, `additionalProperties=false`, `parallel_tool_calls=false`를 사용한다.
+- tool call 결과는 `function_call_output`으로 다음 Responses 호출에 다시 전달한다.
+- hosted web search는 신규 연동 기준 `web_search`를 사용하고, 필요 시 `include: ["web_search_call.action.sources"]`로 source metadata를 수집한다.
+- web 결과의 `url_citation`을 검증해 `W1..` citation과 URL snapshot으로 저장한다. local source `S1..S3`와 namespace를 섞지 않는다.
+- Agent는 provider conversation state에 의존하지 않고 `store=False`와 애플리케이션이 관리하는 최근 3개 완료 turn 및 run trajectory를 사용한다.
+- 현재 설정 모델의 hosted web search 지원 여부는 live contract test로 확인한다. 미지원이면 `OPENAI_AGENT_MODEL`을 별도로 설정한다.
